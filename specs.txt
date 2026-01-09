@@ -1,0 +1,87 @@
+IOS APP SPECIFICATION — COIN STACKING DATA COLLECTION
+
+PLATFORM & STACK
+Platform: iOS
+Language: Swift
+UI Framework: SwiftUI
+Minimum iOS Version: iOS 16+
+Target Devices: iPhone (rear camera)
+Architecture: SwiftUI + AVFoundation
+Local Storage: App sandbox filesystem (optional Photos export)
+
+OBJECTIVE
+Develop a native iOS app that enables consistent, standardized video data collection for patients performing a coin stacking task. The data will be used for medical screening, clinical review, and future machine learning applications. The app must enforce recording consistency using a physical paper template containing two QR codes that define the start and end positions and the expected distance and orientation relative to the camera.
+
+TEMPLATE ASSETS (SOURCE OF TRUTH)
+Two paper templates are provided inside the app codebase and must be treated as the authoritative reference:
+- left-template.pdf
+- right-template.pdf
+
+These PDFs define the exact QR codes, the physical spacing between them, and the expected geometry of the paper. The app must load these files as bundled resources and use them to validate template identity (left vs right), expected QR-to-QR distance, and orientation. No hardcoded or approximate QR definitions should be used outside these files.
+
+PHYSICAL SETUP ASSUMPTIONS
+The patient is provided with a printed version of one of the templates. Each template contains two QR codes with a fixed, known physical distance between them. There are two variants: left-hand stacking (left-template.pdf) and right-hand stacking (right-template.pdf). The app must verify that the correct template is present and properly positioned before recording.
+
+APP FLOW OVERVIEW
+Landing Screen → Hand Selection Screen → Camera Alignment + Recording Screen → Video Review Screen → Save / Finish Screen
+
+SCREEN 1 — LANDING SCREEN
+Purpose: Introduce the task and guide the patient into the recording workflow.
+UI Elements: App title, brief instructions explaining the task and the requirement for the paper template, and a primary “Capture Video” button.
+Navigation: Tapping “Capture Video” navigates to the Hand Selection Screen.
+
+SCREEN 2 — HAND SELECTION SCREEN
+Purpose: Determine which template the patient is using.
+UI Elements: Prompt asking which hand is being used, with two large buttons: Left Hand and Right Hand.
+Behavior: The selection is stored as session metadata and determines which template PDF is used as the reference, which QR codes are valid, and which alignment constraints are enforced.
+
+SCREEN 3 — CAMERA ALIGNMENT + RECORDING SCREEN
+Purpose: Ensure consistent framing, distance, and orientation before video capture.
+Camera Configuration: Rear camera, orientation locked (portrait or landscape, choose one), live camera preview.
+
+Pre-Recording Validation Requirements:
+Recording must remain disabled until all of the following conditions are met:
+1) Both QR codes are detected in the camera frame.
+2) Detected QR codes match the selected reference template (left-template.pdf or right-template.pdf).
+3) Distance estimation: the measured pixel distance between QR codes must correspond to the known physical distance defined in the reference PDF within tolerance.
+4) Orientation validation: the paper must be approximately parallel to the camera, rejecting excessive tilt, skew, or partial visibility.
+
+Alignment Feedback UI:
+The app must provide real-time guidance based on validation state, such as:
+- Move closer
+- Move farther
+- Align paper within frame
+- Perfect — ready to record
+
+Recording Controls:
+A Start (arrow) button is shown but enabled only when alignment is valid. When pressed, recording begins immediately, alignment guidance is hidden, and a recording indicator (timer or icon) is displayed.
+
+Recording Parameters:
+Video resolution and frame rate must be fixed (e.g., 1080p at 30 fps). Audio recording is optional and off by default unless explicitly required. Recording stops either via a manual stop button or a fixed-duration auto-stop (choose one implementation).
+
+SCREEN 4 — VIDEO REVIEW SCREEN
+Purpose: Allow verification of recording quality.
+UI Elements: Video playback view with standard play/pause controls and two buttons: Retake and Done.
+Behavior: Retake discards the recording and returns to the Camera screen. Done proceeds to the Save / Finish screen.
+
+SCREEN 5 — SAVE / FINISH SCREEN
+Purpose: Finalize and store the recording.
+UI Elements: Confirmation message and buttons for Save Video and Back to Home.
+Save Behavior: The video is saved to app-local storage and optionally to the Photos library. Metadata is attached to each recording, including hand used, template filename, timestamp, recording duration, device model, and app version.
+
+DATA & FILE MANAGEMENT
+Video Format: MP4.
+File Naming Convention: coinstack_<timestamp>_<hand>.mp4
+Metadata: Stored as a JSON file alongside the video, designed for deterministic parsing and easy ingestion into machine learning pipelines.
+
+PERMISSIONS
+Camera access is required. Photos access is optional if external saving is enabled.
+
+QUALITY & CONSISTENCY REQUIREMENTS
+Recording must not start unless both QR codes are detected, the QR codes match the selected template PDF, and distance and orientation constraints are within tolerance. The UI must be patient-friendly, with large buttons, minimal text, and clear visual feedback.
+
+OUT OF SCOPE
+User accounts or authentication, cloud sync or backend services, on-device machine learning inference, and video editing or trimming are explicitly out of scope.
+
+DELIVERABLES
+A fully functional SwiftUI iOS app with PDF-referenced QR validation, robust camera alignment and recording flow, clean navigation and state management, readable and well-commented Swift code, and clear separation between UI, camera, and vision/template validation logic.
