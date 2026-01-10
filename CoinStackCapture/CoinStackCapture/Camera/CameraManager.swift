@@ -78,53 +78,59 @@ class CameraManager: NSObject, ObservableObject {
     
     // MARK: - Setup
     
-    override init() {
-        super.init()
-        startMotionUpdates()
-    }
-    
-    deinit {
-        motionManager.stopDeviceMotionUpdates()
-    }
-    
     /// Starts motion updates for device orientation detection
-    private func startMotionUpdates() {
+    func startMotionUpdates() {
+        // Default to allowing recording
+        isDeviceHorizontal = true
+        
         guard motionManager.isDeviceMotionAvailable else { return }
         
         motionManager.deviceMotionUpdateInterval = 0.1
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
-            guard let motion = motion, error == nil else { return }
+            guard let self = self, let motion = motion, error == nil else { return }
             
-            // Get gravity vector
             let gravity = motion.gravity
             
-            // Calculate tilt from horizontal
-            // gravity.z is perpendicular to screen, gravity.x and y are in plane
-            // When device is flat, z ≈ ±1, x ≈ 0, y ≈ 0
-            // For landscape, we want the device tilted ~90° from portrait
+            // Device is in landscape when tilted to the side more than up/down
+            let isLandscape = abs(gravity.x) > abs(gravity.y)
+            let tiltAngle = atan2(gravity.y, abs(gravity.x)) * 180 / .pi
             
-            // Calculate angle from horizontal plane
-            let tiltAngle = abs(atan2(gravity.y, gravity.z) * 180 / .pi)
-            
-            // Check if device is roughly horizontal (landscape)
-            // Device is horizontal when gravity x is close to ±1 (device on its side)
-            let isHorizontal = abs(gravity.x) > 0.7 && abs(gravity.z) < 0.5
-            
-            Task { @MainActor in
-                self?.deviceTiltAngle = tiltAngle
-                self?.isDeviceHorizontal = isHorizontal
-            }
+            self.deviceTiltAngle = tiltAngle
+            self.isDeviceHorizontal = isLandscape
         }
+    }
+    
+    func stopMotionUpdates() {
+        motionManager.stopDeviceMotionUpdates()
     }
     
     /// Configures and starts the camera session
     func setupCamera(for hand: HandSelection, useFrontCamera: Bool = false) {
+        print("📷 setupCamera called - hand: \(hand), frontCamera: \(useFrontCamera)")
         self.selectedHand = hand
         self.isUsingFrontCamera = useFrontCamera
         self.isCameraReady = false
+        self.errorMessage = nil
+        
+        // Start motion updates for orientation detection
+        startMotionUpdates()
         
         let session = captureSession
         sessionQueue.async {
+            // Stop if already running
+            if session.isRunning {
+                print("📷 Session already running, stopping first...")
+                session.stopRunning()
+            }
+            
+            // Remove all existing inputs/outputs
+            for input in session.inputs {
+                session.removeInput(input)
+            }
+            for output in session.outputs {
+                session.removeOutput(output)
+            }
+            
             self.configureSession(session: session, useFrontCamera: useFrontCamera)
         }
     }
@@ -213,23 +219,31 @@ class CameraManager: NSObject, ObservableObject {
     
     /// Configures the capture session (runs on sessionQueue)
     nonisolated private func configureSession(session: AVCaptureSession, useFrontCamera: Bool = false) {
+        print("📷 configureSession starting...")
+        
         session.beginConfiguration()
         session.sessionPreset = .hd1920x1080
         
         // Add video input
         let position: AVCaptureDevice.Position = useFrontCamera ? .front : .back
         guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            print("📷 ERROR: Camera not available")
+            session.commitConfiguration()
             Task { @MainActor in
                 self.errorMessage = useFrontCamera ? "Front camera not available" : "Rear camera not available"
+                self.isCameraReady = true // Allow UI to show error
             }
             return
         }
+        
+        print("📷 Got video device: \(videoDevice.localizedName)")
         
         do {
             let videoInput = try AVCaptureDeviceInput(device: videoDevice)
             
             if session.canAddInput(videoInput) {
                 session.addInput(videoInput)
+                print("📷 Added video input")
             }
             
             // Configure camera settings
@@ -246,8 +260,11 @@ class CameraManager: NSObject, ObservableObject {
             videoDevice.unlockForConfiguration()
             
         } catch {
+            print("📷 ERROR: Failed to configure: \(error)")
+            session.commitConfiguration()
             Task { @MainActor in
                 self.errorMessage = "Failed to configure camera: \(error.localizedDescription)"
+                self.isCameraReady = true // Allow UI to show error
             }
             return
         }
@@ -301,12 +318,15 @@ class CameraManager: NSObject, ObservableObject {
         }
         
         let isRunning = session.isRunning
+        print("📷 Session configured, isRunning: \(isRunning)")
         Task { @MainActor in
             self.videoDataOutput = dataOutput
             self.videoOutput = movieOutput
             self.isSessionRunning = isRunning
+            print("📷 Session state updated, waiting for preview...")
             // Small additional delay to ensure preview layer is ready
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                print("📷 Camera ready!")
                 self.isCameraReady = true
             }
         }
@@ -321,7 +341,7 @@ class CameraManager: NSObject, ObservableObject {
     
     /// Stops the camera session
     func stopSession() {
-        motionManager.stopDeviceMotionUpdates()
+        stopMotionUpdates()
         let session = captureSession
         sessionQueue.async {
             session.stopRunning()
@@ -337,7 +357,18 @@ class CameraManager: NSObject, ObservableObject {
     /// Starts video recording
     func startRecording(completion: @escaping (URL?, SessionMetadata?) -> Void) {
         guard let movieOutput = videoOutput,
-              !isRecording else { return }
+              !isRecording,
+              isCameraReady else {
+            print("📷 Cannot start recording - output: \(videoOutput != nil), recording: \(isRecording), ready: \(isCameraReady)")
+            return
+        }
+        
+        // Check for valid video connection
+        guard let connection = movieOutput.connection(with: .video),
+              connection.isActive else {
+            print("📷 Cannot start recording - no active video connection")
+            return
+        }
         
         self.recordingCompletion = completion
         
@@ -350,11 +381,9 @@ class CameraManager: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: outputURL)
         
         // Set video orientation based on device orientation
-        if let connection = movieOutput.connection(with: .video) {
-            if connection.isVideoOrientationSupported {
-                // For landscape recording
-                connection.videoOrientation = .landscapeRight
-            }
+        if connection.isVideoOrientationSupported {
+            // For landscape recording
+            connection.videoOrientation = .landscapeRight
         }
         
         // Start recording
@@ -392,12 +421,11 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         
         // Create Vision request for QR code detection
-        // VNDetectBarcodesRequest finds standard QR codes - the black and white square patterns
         let request = VNDetectBarcodesRequest { [weak self] request, error in
             guard let self = self,
                   let results = request.results as? [VNBarcodeObservation] else { return }
             
-            // Filter for QR codes only (black square patterns)
+            // Filter for QR codes only
             let qrCodes = results.filter { $0.symbology == .qr }
             
             Task { @MainActor in
@@ -405,16 +433,16 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
         
-        // Only detect QR codes - these are the black square patterns
+        // Detect QR codes specifically
         request.symbologies = [.qr]
         
-        // For portrait mode camera, use .right orientation
-        // This matches how the camera captures in portrait mode
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        // Use .up orientation - Vision returns normalized coordinates (0-1)
+        // The Y-flip is handled when converting to preview layer coordinates
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         do {
             try handler.perform([request])
         } catch {
-            print("Vision error: \(error)")
+            // Silently handle errors
         }
     }
     
@@ -484,6 +512,7 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
     
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL, from connections: [AVCaptureConnection], error: Error?) {
         Task { @MainActor in
+            print("🎬 Recording finished at: \(outputFileURL.path)")
             self.isRecording = false
             
             // Capture the completion handler before clearing it
@@ -491,19 +520,28 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             self.recordingCompletion = nil
             
             if let error = error {
-                print("Recording error: \(error.localizedDescription)")
+                print("🎬 Recording error: \(error.localizedDescription)")
                 completion?(nil, nil)
             } else {
+                // Small delay to ensure file is fully written
+                try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+                
                 // Verify the file exists and is readable
                 let fileManager = FileManager.default
                 if fileManager.fileExists(atPath: outputFileURL.path) {
+                    // Check file size
+                    if let attrs = try? fileManager.attributesOfItem(atPath: outputFileURL.path),
+                       let size = attrs[.size] as? Int64 {
+                        print("🎬 Video file size: \(size) bytes")
+                    }
+                    
                     let duration = self.recordingDuration
                     let metadata = SessionMetadata.create(hand: self.selectedHand, duration: duration)
                     
-                    // Call completion immediately - file should be ready
+                    print("🎬 Calling completion handler")
                     completion?(outputFileURL, metadata)
                 } else {
-                    print("Recording file not found at: \(outputFileURL.path)")
+                    print("🎬 Recording file not found at: \(outputFileURL.path)")
                     completion?(nil, nil)
                 }
             }

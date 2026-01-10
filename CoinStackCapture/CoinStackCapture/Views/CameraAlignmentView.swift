@@ -44,27 +44,24 @@ struct CameraAlignmentView: View {
                 // Camera content
                 GeometryReader { geometry in
                     ZStack {
-                        // Always show black background first
-                        Color.black.ignoresSafeArea()
-                        
-                        // Camera preview - only show when ready
-                        if cameraManager.isCameraReady {
-                            CameraPreviewView(cameraManager: cameraManager)
-                                .ignoresSafeArea()
-                        }
+                        // Camera preview - always present, shows black until session connects
+                        CameraPreviewView(cameraManager: cameraManager)
+                            .ignoresSafeArea()
                         
                         // Loading state overlay (shows while camera initializes)
                         if !cameraManager.isCameraReady {
-                            VStack(spacing: 16) {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: Color(hex: "E0A458")))
-                                    .scaleEffect(1.5)
-                                Text("Initializing camera...")
-                                    .font(.custom("Avenir-Medium", size: 16))
-                                    .foregroundColor(Color(hex: "778DA9"))
+                            ZStack {
+                                Color.black
+                                VStack(spacing: 16) {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: Color(hex: "E0A458")))
+                                        .scaleEffect(1.5)
+                                    Text("Initializing camera...")
+                                        .font(.custom("Avenir-Medium", size: 16))
+                                        .foregroundColor(Color(hex: "778DA9"))
+                                }
                             }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color.black)
+                            .ignoresSafeArea()
                         }
                         
                         // Alignment overlay (hidden during recording, only show when camera ready)
@@ -77,17 +74,12 @@ struct CameraAlignmentView: View {
                         
                         // UI overlay
                         VStack {
-                            // Top bar
-                            topBar
-                            
-                            Spacer()
-                            
-                            // Device orientation warning (when not horizontal)
-                            if !cameraManager.isDeviceHorizontal && !cameraManager.isRecording && cameraManager.isCameraReady {
-                                orientationWarning
-                            }
-                            
-                            // Feedback panel (hidden during recording)
+                        // Top bar
+                        topBar
+                        
+                        Spacer()
+                        
+                        // Feedback panel (hidden during recording)
                             if !cameraManager.isRecording && cameraManager.isCameraReady {
                                 feedbackPanel
                             }
@@ -183,37 +175,6 @@ struct CameraAlignmentView: View {
         .padding(.top, 16)
     }
     
-    private var orientationWarning: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "rotate.right")
-                .font(.system(size: 24, weight: .medium))
-                .foregroundColor(Color(hex: "FFC107"))
-                .rotationEffect(.degrees(90))
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Rotate Device")
-                    .font(.custom("Avenir-Heavy", size: 16))
-                    .foregroundColor(.white)
-                Text("Hold phone horizontally for best results")
-                    .font(.custom("Avenir-Medium", size: 13))
-                    .foregroundColor(Color(hex: "778DA9"))
-            }
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.black.opacity(0.8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 16)
-                        .stroke(Color(hex: "FFC107").opacity(0.5), lineWidth: 1)
-                )
-        )
-        .padding(.horizontal, 40)
-        .padding(.bottom, 12)
-        .transition(.move(edge: .top).combined(with: .opacity))
-        .animation(.easeInOut(duration: 0.3), value: cameraManager.isDeviceHorizontal)
-    }
-    
     private var feedbackPanel: some View {
         VStack(spacing: 12) {
             // Status icon
@@ -274,31 +235,18 @@ struct CameraAlignmentView: View {
     }
     
     private var recordingIndicator: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                // Pulsing red dot
-                Circle()
-                    .fill(Color.red)
-                    .frame(width: 14, height: 14)
-                    .modifier(PulsingModifier())
-                
-                // Timer
-                Text(formatDuration(cameraManager.recordingDuration))
-                    .font(.custom("Avenir-Heavy", size: 24))
-                    .foregroundColor(.white)
-                    .monospacedDigit()
-            }
+        HStack(spacing: 12) {
+            // Pulsing red dot
+            Circle()
+                .fill(Color.red)
+                .frame(width: 14, height: 14)
+                .modifier(PulsingModifier())
             
-            // Orientation indicator during recording
-            if !cameraManager.isDeviceHorizontal {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12))
-                    Text("Hold steady & horizontal")
-                        .font(.custom("Avenir-Medium", size: 12))
-                }
-                .foregroundColor(Color(hex: "FFC107"))
-            }
+            // Timer
+            Text(formatDuration(cameraManager.recordingDuration))
+                .font(.custom("Avenir-Heavy", size: 24))
+                .foregroundColor(.white)
+                .monospacedDigit()
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -378,19 +326,28 @@ struct CameraAlignmentView: View {
     // MARK: - Helpers
     
     private func checkCameraPermission() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        print("🔐 Permission status: \(status.rawValue)")
+        
+        switch status {
         case .authorized:
+            print("🔐 Already authorized, setting up camera...")
+            // Set state and start camera setup immediately
             cameraPermissionGranted = true
             isCheckingPermission = false
+            // Start camera setup right away - the view is already loaded at this point
             cameraManager.setupCamera(for: selectedHand)
             
         case .notDetermined:
+            print("🔐 Requesting permission...")
             AVCaptureDevice.requestAccess(for: .video) { granted in
                 DispatchQueue.main.async {
+                    print("🔐 Permission response: \(granted)")
                     self.isCheckingPermission = false
                     if granted {
                         self.cameraPermissionGranted = true
-                        self.cameraManager.setupCamera(for: selectedHand)
+                        // Start camera immediately after permission granted
+                        self.cameraManager.setupCamera(for: self.selectedHand)
                     } else {
                         self.showPermissionAlert = true
                     }
@@ -398,10 +355,12 @@ struct CameraAlignmentView: View {
             }
             
         case .denied, .restricted:
+            print("🔐 Permission denied or restricted")
             isCheckingPermission = false
             showPermissionAlert = true
             
         @unknown default:
+            print("🔐 Unknown permission status")
             isCheckingPermission = false
             showPermissionAlert = true
         }

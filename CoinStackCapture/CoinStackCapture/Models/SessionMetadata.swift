@@ -18,7 +18,7 @@ enum HandSelection: String, Codable, Hashable {
 }
 
 /// Metadata attached to each recording for ML pipeline ingestion
-struct SessionMetadata: Codable {
+struct SessionMetadata: Codable, Hashable {
     /// Which hand was used for the task
     let handUsed: HandSelection
     

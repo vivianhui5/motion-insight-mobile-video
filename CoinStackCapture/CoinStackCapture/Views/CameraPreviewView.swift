@@ -1,58 +1,53 @@
 import SwiftUI
 import AVFoundation
 
-/// UIKit wrapper for AVCaptureVideoPreviewLayer
+/// UIKit wrapper for AVCaptureVideoPreviewLayer with QR code highlighting
 struct CameraPreviewView: UIViewRepresentable {
     
     /// The camera manager providing the capture session
-    let cameraManager: CameraManager
+    @ObservedObject var cameraManager: CameraManager
     
     func makeUIView(context: Context) -> CameraPreviewUIView {
         let view = CameraPreviewUIView()
+        view.backgroundColor = .black
+        // Connect session immediately on view creation
         view.previewLayer.session = cameraManager.captureSession
         view.previewLayer.videoGravity = .resizeAspectFill
-        
-        // Set up connection for front camera mirroring if needed
-        DispatchQueue.main.async {
-            if let connection = view.previewLayer.connection {
-                // Handle mirroring for front camera
-                if cameraManager.isUsingFrontCamera && connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = true
-                }
-            }
-        }
-        
+        print("📺 Preview layer created and connected to session")
         return view
     }
     
     func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
-        // Update session if changed
-        if uiView.previewLayer.session !== cameraManager.captureSession {
-            uiView.previewLayer.session = cameraManager.captureSession
+        // Ensure session stays connected (reconnect if needed)
+        let session = cameraManager.captureSession
+        
+        if uiView.previewLayer.session !== session {
+            uiView.previewLayer.session = session
+            print("📺 Preview layer reconnected to session")
         }
         
-        // Handle mirroring updates for front camera
-        if let connection = uiView.previewLayer.connection {
-            if cameraManager.isUsingFrontCamera {
-                if connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = false
-                    connection.isVideoMirrored = true
-                }
-            } else {
-                if connection.isVideoMirroringSupported {
-                    connection.automaticallyAdjustsVideoMirroring = true
-                }
-            }
-        }
+        uiView.previewLayer.videoGravity = .resizeAspectFill
         
-        // Update layer frame on bounds change
-        uiView.setNeedsLayout()
+        // Update QR code boxes using Vision coordinates
+        // The preview layer handles all coordinate conversion automatically
+        uiView.updateQRCodeBoxes(cameraManager.alignmentState.qrCodePositions)
+        
+        // Force layout update when camera becomes ready or session is running
+        if cameraManager.isCameraReady || cameraManager.isSessionRunning {
+            uiView.setNeedsLayout()
+            uiView.layoutIfNeeded()
+        }
     }
 }
 
-/// UIView subclass containing the preview layer
+/// UIView subclass containing the preview layer and QR code overlay
 class CameraPreviewUIView: UIView {
+    
+    /// Shape layers for QR code highlighting
+    private var qrBoxLayers: [CAShapeLayer] = []
+    
+    /// Color for QR code highlight
+    private let highlightColor = UIColor(red: 0.13, green: 0.59, blue: 0.95, alpha: 1.0) // #2196F3
     
     override class var layerClass: AnyClass {
         AVCaptureVideoPreviewLayer.self
@@ -76,101 +71,73 @@ class CameraPreviewUIView: UIView {
         super.layoutSubviews()
         previewLayer.frame = bounds
     }
-}
-
-/// Overlay showing QR code detection boxes and alignment guides
-struct AlignmentOverlayView: View {
     
-    /// Current alignment state
-    let alignmentState: AlignmentState
-    
-    /// Size of the preview area
-    let previewSize: CGSize
-    
-    /// Blue color for QR code highlight (distinct from green "ready" indicator)
-    private let qrHighlightColor = Color(hex: "2196F3") // Material Blue
-    
-    // Video aspect ratio (1920x1080)
-    private let videoAspectRatio: CGFloat = 1920.0 / 1080.0
-    
-    var body: some View {
-        if #available(iOS 18.0, *) {
-            ZStack {
-                // QR code bounding boxes
-                ForEach(alignmentState.qrCodePositions, id: \.self) { box in
-                    let rect = transformedSquareRect(for: box, in: previewSize)
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(qrHighlightColor, lineWidth: 3)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(qrHighlightColor.opacity(0.15))
-                        )
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-                }
-                
-                // Center guide lines
-                if !alignmentState.isReadyToRecord {
-                    // Vertical guide
-                    Rectangle()
-                        .fill(Color.white.opacity(0.2))
-                        .frame(width: 1, height: previewSize.height * 0.3)
-                    
-                    // Horizontal guide
-                    Rectangle()
-                        .fill(Color.white.opacity(0.2))
-                        .frame(width: previewSize.width * 0.3, height: 1)
-                }
-                
-                // Corner brackets - green when ready, gray when not
-                CornerBrackets(
-                    color: alignmentState.isReadyToRecord ?
-                    Color(hex: "4CAF50") :
-                        Color(hex: "778DA9").opacity(0.5)
-                )
-                .padding(40)
-            }
-        } else {
-            // Fallback on earlier versions
+    /// Updates QR code highlight boxes using Vision bounding boxes
+    /// Vision provides normalized coordinates (0-1) with origin at bottom-left
+    func updateQRCodeBoxes(_ boxes: [CGRect]) {
+        // Remove old layers
+        for layer in qrBoxLayers {
+            layer.removeFromSuperlayer()
+        }
+        qrBoxLayers.removeAll()
+        
+        // Create new layers for each detected QR code
+        for box in boxes {
+            // Vision coordinates: origin at bottom-left, Y increases upward
+            // Metadata output rect: origin at top-left, Y increases downward
+            // Flip Y coordinate to convert
+            let flippedBox = CGRect(
+                x: box.origin.x,
+                y: 1 - box.origin.y - box.height,
+                width: box.width,
+                height: box.height
+            )
+            
+            // Use the preview layer's built-in coordinate conversion
+            // This handles all aspect ratio and orientation transformations automatically
+            let convertedRect = previewLayer.layerRectConverted(fromMetadataOutputRect: flippedBox)
+            
+            // Create shape layer for the box
+            let shapeLayer = CAShapeLayer()
+            let path = UIBezierPath(roundedRect: convertedRect, cornerRadius: 4)
+            shapeLayer.path = path.cgPath
+            shapeLayer.strokeColor = highlightColor.cgColor
+            shapeLayer.fillColor = highlightColor.withAlphaComponent(0.1).cgColor
+            shapeLayer.lineWidth = 2
+            
+            layer.addSublayer(shapeLayer)
+            qrBoxLayers.append(shapeLayer)
         }
     }
+}
+
+/// Overlay showing alignment guides (QR boxes are drawn in UIKit layer)
+struct AlignmentOverlayView: View {
     
-    /// Transforms a normalized Vision rect into a square rect in view coordinates,
-    /// accounting for aspect-fill cropping and coordinate system differences.
-    private func transformedSquareRect(for box: CGRect, in previewSize: CGSize) -> CGRect {
-        let previewAspectRatio = previewSize.width / previewSize.height
-
-        let scaleX: CGFloat
-        let scaleY: CGFloat
-        let offsetX: CGFloat
-        let offsetY: CGFloat
-
-        if previewAspectRatio > videoAspectRatio {
-            // Preview is wider - video is cropped top/bottom
-            scaleX = previewSize.width
-            scaleY = previewSize.width / videoAspectRatio
-            offsetY = (scaleY - previewSize.height) / 2
-            offsetX = 0
-        } else {
-            // Preview is taller - video is cropped left/right
-            scaleY = previewSize.height
-            scaleX = previewSize.height * videoAspectRatio
-            offsetX = (scaleX - previewSize.width) / 2
-            offsetY = 0
+    let alignmentState: AlignmentState
+    let previewSize: CGSize
+    
+    var body: some View {
+        ZStack {
+            // Center guide lines
+            if !alignmentState.isReadyToRecord {
+                Rectangle()
+                    .fill(Color.white.opacity(0.2))
+                    .frame(width: 1, height: previewSize.height * 0.3)
+                
+                Rectangle()
+                    .fill(Color.white.opacity(0.2))
+                    .frame(width: previewSize.width * 0.3, height: 1)
+            }
+            
+            // Corner brackets
+            CornerBrackets(
+                color: alignmentState.isReadyToRecord ?
+                    Color(hex: "4CAF50") :
+                    Color(hex: "778DA9").opacity(0.5)
+            )
+            .padding(40)
         }
-
-        // Apply transformation - flip Y axis and apply scale
-        let transformedX = box.minX * scaleX - offsetX
-        let transformedY = (1 - box.maxY) * scaleY - offsetY
-        let transformedWidth = box.width * scaleX
-        let transformedHeight = box.height * scaleY
-
-        // Make the box square by using the larger dimension and add 10% padding
-        let size = max(transformedWidth, transformedHeight) * 1.1
-        let centerX = transformedX + transformedWidth / 2
-        let centerY = transformedY + transformedHeight / 2
-
-        return CGRect(x: centerX - size / 2, y: centerY - size / 2, width: size, height: size)
     }
 }
 
@@ -184,12 +151,8 @@ private struct CornerBrackets: View {
         GeometryReader { geo in
             // Top-left
             VStack(spacing: 0) {
-                Rectangle()
-                    .fill(color)
-                    .frame(width: length, height: thickness)
-                Rectangle()
-                    .fill(color)
-                    .frame(width: thickness, height: length - thickness)
+                Rectangle().fill(color).frame(width: length, height: thickness)
+                Rectangle().fill(color).frame(width: thickness, height: length - thickness)
                 Spacer()
             }
             .frame(width: length, height: length)
@@ -197,14 +160,10 @@ private struct CornerBrackets: View {
             
             // Top-right
             VStack(spacing: 0) {
-                Rectangle()
-                    .fill(color)
-                    .frame(width: length, height: thickness)
+                Rectangle().fill(color).frame(width: length, height: thickness)
                 HStack {
                     Spacer()
-                    Rectangle()
-                        .fill(color)
-                        .frame(width: thickness, height: length - thickness)
+                    Rectangle().fill(color).frame(width: thickness, height: length - thickness)
                 }
                 Spacer()
             }
@@ -215,14 +174,10 @@ private struct CornerBrackets: View {
             VStack(spacing: 0) {
                 Spacer()
                 HStack {
-                    Rectangle()
-                        .fill(color)
-                        .frame(width: thickness, height: length - thickness)
+                    Rectangle().fill(color).frame(width: thickness, height: length - thickness)
                     Spacer()
                 }
-                Rectangle()
-                    .fill(color)
-                    .frame(width: length, height: thickness)
+                Rectangle().fill(color).frame(width: length, height: thickness)
             }
             .frame(width: length, height: length)
             .position(x: length/2, y: geo.size.height - length/2)
@@ -232,17 +187,12 @@ private struct CornerBrackets: View {
                 Spacer()
                 HStack {
                     Spacer()
-                    Rectangle()
-                        .fill(color)
-                        .frame(width: thickness, height: length - thickness)
+                    Rectangle().fill(color).frame(width: thickness, height: length - thickness)
                 }
-                Rectangle()
-                    .fill(color)
-                    .frame(width: length, height: thickness)
+                Rectangle().fill(color).frame(width: length, height: thickness)
             }
             .frame(width: length, height: length)
             .position(x: geo.size.width - length/2, y: geo.size.height - length/2)
         }
     }
 }
-

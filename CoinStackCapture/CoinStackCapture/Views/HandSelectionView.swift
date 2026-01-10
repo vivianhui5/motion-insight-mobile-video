@@ -122,13 +122,14 @@ private struct HandButton: View {
     let isPressed: Bool
     let onTap: () -> Void
     
-    @State private var pressed = false
-    
     var body: some View {
-        Button(action: onTap) {
+        Button(action: {
+            print("🖐️ Hand button tapped: \(hand == .left ? "Left" : "Right")")
+            onTap()
+        }) {
             VStack(spacing: 20) {
                 // Hand icon
-                Image(systemName: hand == .left ? "hand.raised.fill" : "hand.raised.fill")
+                Image(systemName: "hand.raised.fill")
                     .font(.system(size: 56, weight: .light))
                     .foregroundColor(Color(hex: "E0E1DD"))
                     .scaleEffect(x: hand == .left ? -1 : 1, y: 1)
@@ -144,6 +145,15 @@ private struct HandButton: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: 200)
+        }
+        .buttonStyle(HandButtonStyle())
+    }
+}
+
+/// Custom button style for hand selection buttons with press animation
+private struct HandButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
             .background(
                 RoundedRectangle(cornerRadius: 24)
                     .fill(
@@ -159,36 +169,22 @@ private struct HandButton: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 24)
                             .stroke(
-                                pressed ?
+                                configuration.isPressed ?
                                     Color(hex: "E0A458") :
                                     Color(hex: "415A77").opacity(0.5),
-                                lineWidth: pressed ? 2 : 1
+                                lineWidth: configuration.isPressed ? 2 : 1
                             )
                     )
             )
-            .scaleEffect(pressed ? 0.97 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .shadow(
-                color: pressed ?
+                color: configuration.isPressed ?
                     Color(hex: "E0A458").opacity(0.3) :
                     Color.black.opacity(0.2),
-                radius: pressed ? 15 : 10,
-                y: pressed ? 2 : 5
+                radius: configuration.isPressed ? 15 : 10,
+                y: configuration.isPressed ? 2 : 5
             )
-        }
-        .buttonStyle(PlainButtonStyle())
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    withAnimation(.easeInOut(duration: 0.1)) {
-                        pressed = true
-                    }
-                }
-                .onEnded { _ in
-                    withAnimation(.easeInOut(duration: 0.1)) {
-                        pressed = false
-                    }
-                }
-        )
+            .animation(.easeInOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 

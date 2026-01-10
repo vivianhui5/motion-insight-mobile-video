@@ -277,9 +277,12 @@ struct VideoReviewView: View {
     // MARK: - Video Loading
     
     private func loadVideo() {
+        print("🎥 Loading video from: \(videoURL.path)")
+        
         // Verify file exists
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: videoURL.path) else {
+            print("🎥 ERROR: Video file not found")
             loadError = "Video file not found"
             isLoading = false
             return
@@ -289,12 +292,14 @@ struct VideoReviewView: View {
         do {
             let attributes = try fileManager.attributesOfItem(atPath: videoURL.path)
             let fileSize = attributes[.size] as? Int64 ?? 0
+            print("🎥 Video file size: \(fileSize) bytes")
             if fileSize == 0 {
                 loadError = "Video file is empty"
                 isLoading = false
                 return
             }
         } catch {
+            print("🎥 ERROR: Cannot read video file: \(error)")
             loadError = "Cannot read video file"
             isLoading = false
             return
