@@ -15,9 +15,6 @@ struct SaveFinishView: View {
     /// Save state
     @State private var saveState: SaveState = .idle
     
-    /// Whether to save to Photos
-    @State private var saveToPhotos = false
-    
     /// Animation state
     @State private var appeared = false
     @State private var showSuccess = false
@@ -150,25 +147,16 @@ struct SaveFinishView: View {
     
     private var actionSection: some View {
         VStack(spacing: 20) {
-            // Photos toggle
-            Toggle(isOn: $saveToPhotos) {
-                HStack(spacing: 12) {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.system(size: 20))
-                        .foregroundColor(Color(hex: "E0A458"))
-                    
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Save to Photos")
-                            .font(.custom("Avenir-Heavy", size: 16))
-                            .foregroundColor(Color(hex: "E0E1DD"))
-                        
-                        Text("Also export to your photo library")
-                            .font(.custom("Avenir-Medium", size: 13))
-                            .foregroundColor(Color(hex: "778DA9"))
-                    }
-                }
+            // Save to Photos info
+            HStack(spacing: 12) {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.system(size: 20))
+                    .foregroundColor(Color(hex: "E0A458"))
+                
+                Text("Video will be saved to your Photo Library")
+                    .font(.custom("Avenir-Medium", size: 14))
+                    .foregroundColor(Color(hex: "778DA9"))
             }
-            .toggleStyle(SwitchToggleStyle(tint: Color(hex: "E0A458")))
             .padding(.horizontal, 24)
             
             // Save button
@@ -249,10 +237,8 @@ struct SaveFinishView: View {
                 // Save to app storage
                 _ = try storage.saveVideo(from: videoURL, with: metadata)
                 
-                // Optionally save to Photos
-                if saveToPhotos {
-                    try await storage.saveToPhotosLibrary(videoURL: videoURL)
-                }
+                // Always save to Photos library
+                try await storage.saveToPhotosLibrary(videoURL: videoURL)
                 
                 await MainActor.run {
                     withAnimation {

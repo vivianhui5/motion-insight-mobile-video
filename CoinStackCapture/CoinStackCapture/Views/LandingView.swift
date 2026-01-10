@@ -113,7 +113,7 @@ struct LandingView: View {
                     
                     InstructionRow(
                         icon: "hand.raised",
-                        text: "Coins for the stacking task"
+                        text: "Pennies for the stacking task"
                     )
                     
                     InstructionRow(

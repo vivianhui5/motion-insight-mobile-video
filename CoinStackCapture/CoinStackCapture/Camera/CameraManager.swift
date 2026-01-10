@@ -493,7 +493,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 let angleDegrees = angleRadians * 180 / .pi
                 newState.angleFromHorizontal = angleDegrees
                 
-                // Validate orientation based on expected diagonal arrangement
+                // Validate orientation - very lenient for side-angle viewing
                 newState.orientationValid = TemplateConfiguration.validateDiagonalAngle(angleDegrees, for: selectedHand)
             }
         }

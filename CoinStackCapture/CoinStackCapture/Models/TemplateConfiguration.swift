@@ -56,7 +56,9 @@ struct TemplateConfiguration {
     static let rightTemplateDiagonalAngle: CGFloat = 45.0
     
     /// Maximum allowed angle deviation from expected diagonal (degrees)
-    static let maxAngleDeviationDegrees: CGFloat = 30.0
+    /// Moderately lenient to allow side-angle viewing, but indicator only turns green
+    /// when alignment is reasonably good
+    static let maxAngleDeviationDegrees: CGFloat = 40.0
     
     // MARK: - Helper Methods
     
@@ -73,6 +75,12 @@ struct TemplateConfiguration {
     /// Validates the diagonal angle between detected QR codes
     /// Accepts angles in either direction (QR1→QR2 or QR2→QR1)
     static func validateDiagonalAngle(_ measuredAngle: CGFloat, for hand: HandSelection) -> Bool {
+        let deviation = angleDeviation(measuredAngle, for: hand)
+        return deviation < maxAngleDeviationDegrees
+    }
+    
+    /// Calculates the minimum angle deviation from expected (handles 180° flip)
+    private static func angleDeviation(_ measuredAngle: CGFloat, for hand: HandSelection) -> CGFloat {
         let expectedAngle = expectedDiagonalAngle(for: hand)
         
         // Check if angle matches expected or opposite direction (180° flip)
@@ -80,8 +88,7 @@ struct TemplateConfiguration {
         let deviation2 = abs(measuredAngle - (expectedAngle + 180))
         let deviation3 = abs(measuredAngle - (expectedAngle - 180))
         
-        let minDeviation = min(deviation1, min(deviation2, deviation3))
-        return minDeviation < maxAngleDeviationDegrees
+        return min(deviation1, min(deviation2, deviation3))
     }
     
     /// Calculates the distance feedback based on measured pixel distance

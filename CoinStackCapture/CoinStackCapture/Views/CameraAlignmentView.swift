@@ -74,12 +74,17 @@ struct CameraAlignmentView: View {
                         
                         // UI overlay
                         VStack {
-                        // Top bar
-                        topBar
-                        
-                        Spacer()
-                        
-                        // Feedback panel (hidden during recording)
+                            // Top bar
+                            topBar
+                            
+                            Spacer()
+                            
+                            // Horizontal phone guidance (when not horizontal and not recording)
+                            if !cameraManager.isDeviceHorizontal && !cameraManager.isRecording && cameraManager.isCameraReady {
+                                horizontalGuidance
+                            }
+                            
+                            // Feedback panel (hidden during recording)
                             if !cameraManager.isRecording && cameraManager.isCameraReady {
                                 feedbackPanel
                             }
@@ -173,6 +178,36 @@ struct CameraAlignmentView: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
+    }
+    
+    private var horizontalGuidance: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "iphone.landscape")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundColor(Color(hex: "FFC107"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Hold Phone Horizontally")
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text("Rotate for best video quality")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "FFC107").opacity(0.5), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 12)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.isDeviceHorizontal)
     }
     
     private var feedbackPanel: some View {

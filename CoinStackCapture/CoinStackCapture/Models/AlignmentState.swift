@@ -12,7 +12,7 @@ struct AlignmentState {
     /// Current distance feedback
     var distanceFeedback: DistanceFeedback = .tooFar
     
-    /// Whether the paper orientation is acceptable
+    /// Whether the paper orientation is acceptable (very lenient)
     var orientationValid: Bool = false
     
     /// Detected QR code positions (for visualization)
@@ -27,6 +27,7 @@ struct AlignmentState {
     var angleFromHorizontal: CGFloat = 0
     
     /// Returns true if all alignment conditions are met
+    /// Orientation is very lenient - focus is on distance
     var isReadyToRecord: Bool {
         return bothQRCodesDetected &&
                qrCodesMatchTemplate &&
@@ -34,38 +35,45 @@ struct AlignmentState {
                orientationValid
     }
     
-    /// Human-readable feedback message
+    /// Human-readable feedback message - prioritizes distance over orientation
     var feedbackMessage: String {
         if !bothQRCodesDetected {
             return "Position both QR codes in frame"
         }
         
-        if !orientationValid {
-            return "Align the paper flat"
-        }
-        
+        // Prioritize distance feedback over orientation
         switch distanceFeedback {
         case .tooClose:
             return "Move farther away"
         case .tooFar:
             return "Move closer"
         case .optimal:
+            if !orientationValid {
+                return "Paper is too tilted"
+            }
             return "Perfect — Ready to record"
         }
     }
     
     /// Secondary hint message for additional guidance
     var feedbackHint: String? {
+        // No hints when ready to record - everything is good!
+        if isReadyToRecord {
+            return nil
+        }
+        
         if !bothQRCodesDetected {
             return "Both corner QR codes should be visible"
         }
         
-        if !orientationValid {
-            return "Keep paper parallel to camera"
-        }
-        
+        // Show distance hint first (most important)
         if distanceFeedback != .optimal {
             return "Adjust distance until indicator is green"
+        }
+        
+        // Only show orientation hint if distance is good but orientation is invalid
+        if !orientationValid {
+            return "Adjust paper angle"
         }
         
         return nil
@@ -77,10 +85,10 @@ struct AlignmentState {
             return "checkmark.circle.fill"
         } else if !bothQRCodesDetected {
             return "viewfinder"
-        } else if !orientationValid {
-            return "rotate.right"
-        } else {
+        } else if distanceFeedback != .optimal {
             return "arrow.up.and.down"
+        } else {
+            return "rotate.right"
         }
     }
     
