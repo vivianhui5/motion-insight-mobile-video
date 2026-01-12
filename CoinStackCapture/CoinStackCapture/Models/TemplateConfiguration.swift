@@ -56,9 +56,8 @@ struct TemplateConfiguration {
     static let rightTemplateDiagonalAngle: CGFloat = 45.0
     
     /// Maximum allowed angle deviation from expected diagonal (degrees)
-    /// Moderately lenient to allow side-angle viewing, but indicator only turns green
-    /// when alignment is reasonably good
-    static let maxAngleDeviationDegrees: CGFloat = 40.0
+    /// Lenient to allow various viewing angles - indicator turns green when reasonably aligned
+    static let maxAngleDeviationDegrees: CGFloat = 50.0
     
     // MARK: - Helper Methods
     

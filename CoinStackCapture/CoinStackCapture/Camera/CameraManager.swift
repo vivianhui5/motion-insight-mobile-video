@@ -33,6 +33,14 @@ class CameraManager: NSObject, ObservableObject {
     /// Current device tilt angle (degrees from horizontal)
     @Published var deviceTiltAngle: Double = 0
     
+    /// Current device pitch angle (how much it's tilted forward/looking down)
+    /// 0 = looking straight ahead, -90 = looking straight down (bird's eye)
+    @Published var devicePitchAngle: Double = 0
+    
+    /// Whether the viewing angle is good (not too flat/bird's eye view)
+    /// Phone should be angled to look at paper from the side, not directly above
+    @Published var isViewingAngleGood = true
+    
     /// Whether using front camera
     @Published var isUsingFrontCamera = false
     
@@ -82,6 +90,7 @@ class CameraManager: NSObject, ObservableObject {
     func startMotionUpdates() {
         // Default to allowing recording
         isDeviceHorizontal = true
+        isViewingAngleGood = true
         
         guard motionManager.isDeviceMotionAvailable else { return }
         
@@ -97,6 +106,19 @@ class CameraManager: NSObject, ObservableObject {
             
             self.deviceTiltAngle = tiltAngle
             self.isDeviceHorizontal = isLandscape
+            
+            // Calculate pitch angle (how much the phone is looking down)
+            // gravity.z: -1 = looking straight down (bird's eye), 0 = looking straight ahead
+            // Convert to degrees: 0 = straight ahead, -90 = straight down
+            let pitchAngle = asin(-gravity.z) * 180 / .pi
+            self.devicePitchAngle = pitchAngle
+            
+            // Good viewing angle: phone should be tilted 10-60° down (not flat/bird's eye)
+            // At 100cm horizontal, 50cm vertical = arctan(0.5) ≈ 27° is ideal
+            // Allow range of 10° to 60° to be flexible
+            let isTooFlat = pitchAngle > 60  // Looking too straight down (bird's eye)
+            let isTooStraight = pitchAngle < 5  // Looking almost straight ahead
+            self.isViewingAngleGood = !isTooFlat && !isTooStraight
         }
     }
     
@@ -497,6 +519,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 newState.orientationValid = TemplateConfiguration.validateDiagonalAngle(angleDegrees, for: selectedHand)
             }
         }
+        
+        // Include viewing angle check from device motion
+        newState.isViewingAngleGood = self.isViewingAngleGood
         
         self.alignmentState = newState
     }

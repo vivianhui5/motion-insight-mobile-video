@@ -26,13 +26,17 @@ struct AlignmentState {
     /// Right template: expects ~-45° (bottom-left to top-right diagonal)
     var angleFromHorizontal: CGFloat = 0
     
+    /// Whether the phone's viewing angle is good (not too flat/bird's eye)
+    var isViewingAngleGood: Bool = true
+    
     /// Returns true if all alignment conditions are met
     /// Orientation is very lenient - focus is on distance
     var isReadyToRecord: Bool {
         return bothQRCodesDetected &&
                qrCodesMatchTemplate &&
                distanceFeedback == .optimal &&
-               orientationValid
+               orientationValid &&
+               isViewingAngleGood
     }
     
     /// Human-readable feedback message - prioritizes distance over orientation
@@ -50,6 +54,9 @@ struct AlignmentState {
         case .optimal:
             if !orientationValid {
                 return "Paper is too tilted"
+            }
+            if !isViewingAngleGood {
+                return "Angle your phone properly"
             }
             return "Perfect — Ready to record"
         }
@@ -76,6 +83,11 @@ struct AlignmentState {
             return "Adjust paper angle"
         }
         
+        // Show angle hint if viewing angle is too flat
+        if !isViewingAngleGood {
+            return "Don't point straight down at the paper"
+        }
+        
         return nil
     }
     
@@ -87,6 +99,10 @@ struct AlignmentState {
             return "viewfinder"
         } else if distanceFeedback != .optimal {
             return "arrow.up.and.down"
+        } else if !orientationValid {
+            return "rotate.right"
+        } else if !isViewingAngleGood {
+            return "iphone.gen3.radiowaves.left.and.right"
         } else {
             return "rotate.right"
         }

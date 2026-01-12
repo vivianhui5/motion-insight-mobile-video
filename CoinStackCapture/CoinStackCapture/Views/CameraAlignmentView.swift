@@ -84,6 +84,11 @@ struct CameraAlignmentView: View {
                                 horizontalGuidance
                             }
                             
+                            // Viewing angle guidance (when too flat/bird's eye or too straight)
+                            if cameraManager.isDeviceHorizontal && !cameraManager.isViewingAngleGood && !cameraManager.isRecording && cameraManager.isCameraReady {
+                                viewingAngleGuidance
+                            }
+                            
                             // Feedback panel (hidden during recording)
                             if !cameraManager.isRecording && cameraManager.isCameraReady {
                                 feedbackPanel
@@ -210,6 +215,38 @@ struct CameraAlignmentView: View {
         .animation(.easeInOut(duration: 0.3), value: cameraManager.isDeviceHorizontal)
     }
     
+    private var viewingAngleGuidance: some View {
+        HStack(spacing: 12) {
+            Image(systemName: cameraManager.devicePitchAngle > 60 ? "arrow.up.forward" : "arrow.down.forward")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundColor(Color(hex: "2196F3"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(cameraManager.devicePitchAngle > 60 ? "Don't Point Straight Down" : "Angle Phone Toward Paper")
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text(cameraManager.devicePitchAngle > 60 ? 
+                     "Position phone to the side, not directly above" : 
+                     "Tilt phone down toward the paper")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "2196F3").opacity(0.5), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 12)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.isViewingAngleGood)
+    }
+    
     private var feedbackPanel: some View {
         VStack(spacing: 12) {
             // Status icon
@@ -296,7 +333,7 @@ struct CameraAlignmentView: View {
         HStack {
             Spacer()
             
-            // Record/Stop button
+            // Record/Stop button - always enabled so user can record even if alignment isn't perfect
             Button(action: {
                 if cameraManager.isRecording {
                     cameraManager.stopRecording()
@@ -311,6 +348,7 @@ struct CameraAlignmentView: View {
                         .frame(width: 80, height: 80)
                     
                     // Inner shape (circle for record, square for stop)
+                    // Visual indicator: red when aligned, orange when not (but still tappable)
                     if cameraManager.isRecording {
                         RoundedRectangle(cornerRadius: 6)
                             .fill(Color.red)
@@ -318,12 +356,12 @@ struct CameraAlignmentView: View {
                     } else {
                         Circle()
                             .fill(cameraManager.alignmentState.isReadyToRecord ?
-                                  Color.red : Color.gray)
+                                  Color.red : Color.orange)
                             .frame(width: 64, height: 64)
                     }
                 }
             }
-            .disabled(!cameraManager.alignmentState.isReadyToRecord && !cameraManager.isRecording)
+            // Button is always enabled - user can record anytime
             
             Spacer()
         }

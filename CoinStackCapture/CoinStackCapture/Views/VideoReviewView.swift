@@ -1,8 +1,8 @@
 import SwiftUI
 import AVKit
+import Combine
 
 /// Observable class to manage video playback state
-@MainActor
 class VideoPlaybackManager: ObservableObject {
     @Published var player: AVPlayer?
     @Published var isPlaying = false
@@ -13,6 +13,7 @@ class VideoPlaybackManager: ObservableObject {
     
     private var playerItem: AVPlayerItem?
     private var timeObserver: Any?
+    private var endObserver: NSObjectProtocol?
     
     func loadVideo(from url: URL) {
         print("🎥 Loading video from: \(url.path)")
@@ -21,8 +22,10 @@ class VideoPlaybackManager: ObservableObject {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: url.path) else {
             print("🎥 ERROR: Video file not found")
-            loadError = "Video file not found"
-            isLoading = false
+            DispatchQueue.main.async {
+                self.loadError = "Video file not found"
+                self.isLoading = false
+            }
             return
         }
         
@@ -32,14 +35,18 @@ class VideoPlaybackManager: ObservableObject {
             let fileSize = attributes[.size] as? Int64 ?? 0
             print("🎥 Video file size: \(fileSize) bytes")
             if fileSize == 0 {
-                loadError = "Video file is empty"
-                isLoading = false
+                DispatchQueue.main.async {
+                    self.loadError = "Video file is empty"
+                    self.isLoading = false
+                }
                 return
             }
         } catch {
             print("🎥 ERROR: Cannot read video file: \(error)")
-            loadError = "Cannot read video file"
-            isLoading = false
+            DispatchQueue.main.async {
+                self.loadError = "Cannot read video file"
+                self.isLoading = false
+            }
             return
         }
         
@@ -58,20 +65,26 @@ class VideoPlaybackManager: ObservableObject {
                 let durationSeconds = CMTimeGetSeconds(loadedDuration)
                 
                 guard durationSeconds.isFinite && durationSeconds > 0 else {
-                    self.loadError = "Invalid video duration"
-                    self.isLoading = false
+                    DispatchQueue.main.async {
+                        self.loadError = "Invalid video duration"
+                        self.isLoading = false
+                    }
                     return
                 }
                 
-                self.duration = durationSeconds
-                self.player = newPlayer
-                self.isLoading = false
-                self.setupTimeObserver()
-                self.setupEndObserver()
-                print("🎥 Video loaded, duration: \(durationSeconds)s")
+                DispatchQueue.main.async {
+                    self.duration = durationSeconds
+                    self.player = newPlayer
+                    self.isLoading = false
+                    self.setupTimeObserver()
+                    self.setupEndObserver()
+                    print("🎥 Video loaded, duration: \(durationSeconds)s")
+                }
             } catch {
-                self.loadError = "Failed to load video: \(error.localizedDescription)"
-                self.isLoading = false
+                DispatchQueue.main.async {
+                    self.loadError = "Failed to load video: \(error.localizedDescription)"
+                    self.isLoading = false
+                }
             }
         }
     }
@@ -79,41 +92,41 @@ class VideoPlaybackManager: ObservableObject {
     private func setupTimeObserver() {
         guard let player = player else { return }
         
-        let interval = CMTime(seconds: 0.05, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        // Update progress every 0.1 seconds
+        let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
-            guard let self = self else { return }
-            Task { @MainActor in
-                guard self.duration > 0 else { return }
-                let currentSeconds = CMTimeGetSeconds(time)
-                if currentSeconds.isFinite {
-                    self.progress = currentSeconds / self.duration
-                }
+            guard let self = self, self.duration > 0 else { return }
+            let currentSeconds = CMTimeGetSeconds(time)
+            if currentSeconds.isFinite {
+                self.progress = currentSeconds / self.duration
             }
         }
     }
     
     private func setupEndObserver() {
-        NotificationCenter.default.addObserver(
+        endObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: playerItem,
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
-            Task { @MainActor in
-                self.isPlaying = false
-                self.player?.seek(to: .zero)
-                self.progress = 0
-            }
+            self.isPlaying = false
+            self.player?.seek(to: .zero)
+            self.progress = 0
+            print("🎥 Playback ended")
         }
     }
     
     func togglePlayback() {
-        guard let player = player else { return }
+        guard let player = player else {
+            print("🎥 No player available")
+            return
+        }
         
         if isPlaying {
             player.pause()
             isPlaying = false
-            print("🎥 Paused")
+            print("🎥 Paused at progress: \(progress)")
         } else {
             if progress >= 0.99 {
                 player.seek(to: .zero)
@@ -121,7 +134,7 @@ class VideoPlaybackManager: ObservableObject {
             }
             player.play()
             isPlaying = true
-            print("🎥 Playing")
+            print("🎥 Playing from progress: \(progress)")
         }
     }
     
@@ -142,10 +155,14 @@ class VideoPlaybackManager: ObservableObject {
         }
         timeObserver = nil
         
-        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: playerItem)
+        if let endObs = endObserver {
+            NotificationCenter.default.removeObserver(endObs)
+        }
+        endObserver = nil
         
         player = nil
         playerItem = nil
+        print("🎥 Cleanup complete")
     }
 }
 
@@ -322,7 +339,9 @@ struct VideoReviewView: View {
                 Spacer()
                 
                 // Play/Pause button
-                Button(action: { playbackManager.togglePlayback() }) {
+                Button(action: {
+                    playbackManager.togglePlayback()
+                }) {
                     ZStack {
                         Circle()
                             .fill(Color(hex: "1B263B"))
@@ -337,7 +356,9 @@ struct VideoReviewView: View {
                             .foregroundColor(Color(hex: "E0A458"))
                             .offset(x: playbackManager.isPlaying ? 0 : 2)
                     }
+                    .contentShape(Circle())
                 }
+                .buttonStyle(.plain)
                 
                 Spacer()
                 
@@ -353,11 +374,11 @@ struct VideoReviewView: View {
     
     private var actionButtons: some View {
         VStack(spacing: 16) {
-            // Done button - must be instant
-            Button {
+            // Done button - must be instant and always responsive
+            Button(action: {
                 print("✅ Looks Good button pressed - navigating immediately")
                 onDone()
-            } label: {
+            }) {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 20))
@@ -375,13 +396,15 @@ struct VideoReviewView: View {
                     )
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 16))
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             
             // Retake button
-            Button {
+            Button(action: {
                 print("🔄 Retake Video button pressed")
                 onRetake()
-            } label: {
+            }) {
                 HStack(spacing: 10) {
                     Image(systemName: "arrow.counterclockwise")
                         .font(.system(size: 18))
@@ -395,7 +418,9 @@ struct VideoReviewView: View {
                     RoundedRectangle(cornerRadius: 14)
                         .stroke(Color(hex: "415A77"), lineWidth: 1.5)
                 )
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 24)
         .padding(.bottom, 40)
@@ -411,21 +436,22 @@ struct VideoReviewView: View {
     }
 }
 
-/// Container for video player that properly displays AVPlayer
+/// Container for video player - displays video without built-in controls
+/// We use our own custom controls for better integration
 private struct VideoPlayerContainer: UIViewControllerRepresentable {
     let player: AVPlayer
     
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
-        controller.showsPlaybackControls = true
+        // Disable built-in controls - we have our own
+        controller.showsPlaybackControls = false
         controller.videoGravity = .resizeAspect
         controller.view.backgroundColor = .black
         return controller
     }
     
     func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
-        // Update player reference if needed
         if uiViewController.player !== player {
             uiViewController.player = player
         }
