@@ -15,8 +15,12 @@ struct AlignmentState {
     /// Whether the paper orientation is acceptable (very lenient)
     var orientationValid: Bool = false
     
-    /// Detected QR code positions (for visualization)
+    /// Detected QR code positions (bounding boxes for backward compatibility)
     var qrCodePositions: [CGRect] = []
+    
+    /// Detected QR code corner points (for accurate quadrilateral visualization)
+    /// Each array contains 4 points: [topLeft, topRight, bottomRight, bottomLeft] in normalized coordinates
+    var qrCodeCorners: [[CGPoint]] = []
     
     /// Measured pixel distance between QR codes
     var measuredPixelDistance: CGFloat = 0
@@ -28,6 +32,55 @@ struct AlignmentState {
     
     /// Whether the phone's viewing angle is good (not too flat/bird's eye)
     var isViewingAngleGood: Bool = true
+    
+    /// Estimated distance from camera to the top QR code (in centimeters)
+    /// Calculated using known QR code size (6cm) and apparent pixel size
+    var distanceToTopQR: CGFloat?
+    
+    /// QR code roll angle (degrees) - how much the QR code's top edge is rotated from horizontal
+    /// 0° = top edge is perfectly horizontal (parallel to screen bottom)
+    /// Positive = clockwise rotation, Negative = counter-clockwise
+    var qrCodeRoll: CGFloat = 0
+    
+    /// Center position of all detected QR codes (normalized 0-1, where 0.5 is center)
+    /// Used for centering guidance
+    var qrCodesCenter: CGPoint = CGPoint(x: 0.5, y: 0.5)
+    
+    /// Roll tolerance in degrees - within this range is considered "good"
+    static let rollTolerance: CGFloat = 5.0
+    
+    /// Horizontal center tolerance - stricter, QR codes should be well-centered horizontally
+    /// 0.08 means within 8% of center (0.42-0.58 range)
+    static let horizontalCenterTolerance: CGFloat = 0.08
+    
+    /// Vertical center tolerance - more lenient for vertical positioning
+    static let verticalCenterTolerance: CGFloat = 0.15
+    
+    /// Ideal vertical position for QR codes - bottom 2/3 of screen
+    /// In Vision coordinates: y=0 is bottom, y=1 is top
+    /// We want QR codes in bottom 2/3, so ideal center is around 0.33
+    static let idealVerticalCenter: CGFloat = 0.33
+    
+    /// Whether the roll is within acceptable tolerance (±5°)
+    var isRollGood: Bool {
+        return abs(qrCodeRoll) <= AlignmentState.rollTolerance
+    }
+    
+    /// Whether QR codes are horizontally centered (strict - within 8% of center)
+    var isHorizontallyCentered: Bool {
+        return abs(qrCodesCenter.x - 0.5) <= AlignmentState.horizontalCenterTolerance
+    }
+    
+    /// Whether QR codes are in the bottom 2/3 of screen (within tolerance)
+    /// Target is y=0.33 (middle of bottom 2/3)
+    var isVerticallyCentered: Bool {
+        return abs(qrCodesCenter.y - AlignmentState.idealVerticalCenter) <= AlignmentState.verticalCenterTolerance
+    }
+    
+    /// Whether QR codes are well-centered overall
+    var isCentered: Bool {
+        return isHorizontallyCentered && isVerticallyCentered
+    }
     
     /// Returns true if all alignment conditions are met
     /// Orientation is very lenient - focus is on distance

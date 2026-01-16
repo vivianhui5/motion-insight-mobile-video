@@ -25,6 +25,15 @@ struct CameraAlignmentView: View {
     /// Whether we're checking permission (initial state)
     @State private var isCheckingPermission = true
     
+    /// Whether to show the retake recommendation dialog
+    @State private var showRetakeDialog = false
+    
+    /// The recorded video URL pending review
+    @State private var pendingVideoURL: URL?
+    
+    /// The pending session metadata
+    @State private var pendingMetadata: SessionMetadata?
+    
     var body: some View {
         ZStack {
             // Background - always black to prevent white flash
@@ -74,35 +83,86 @@ struct CameraAlignmentView: View {
                         
                         // UI overlay
                         VStack {
-                            // Top bar
+                            // Top bar - stays fixed, not rotated
                             topBar
                             
                             Spacer()
                             
-                            // Horizontal phone guidance (when not horizontal and not recording)
+                            // Orientation warnings (not rotated - shown in current orientation)
+                            // Portrait mode warning
                             if !cameraManager.isDeviceHorizontal && !cameraManager.isRecording && cameraManager.isCameraReady {
                                 horizontalGuidance
                             }
                             
-                            // Viewing angle guidance (when too flat/bird's eye or too straight)
-                            if cameraManager.isDeviceHorizontal && !cameraManager.isViewingAngleGood && !cameraManager.isRecording && cameraManager.isCameraReady {
-                                viewingAngleGuidance
+                            // Wrong landscape orientation warning (charging port should be on RIGHT)
+                            if cameraManager.isDeviceHorizontal && !cameraManager.isLandscapeRight && !cameraManager.isRecording && cameraManager.isCameraReady {
+                                wrongLandscapeGuidance
                             }
                             
-                            // Feedback panel (hidden during recording)
-                            if !cameraManager.isRecording && cameraManager.isCameraReady {
-                                feedbackPanel
+                            // Front camera warning - should always use rear camera
+                            if cameraManager.isUsingFrontCamera && !cameraManager.isRecording && cameraManager.isCameraReady {
+                                frontCameraWarning
                             }
                             
-                            // Recording indicator
+                            // Debug: log current state
+                            let _ = {
+                                print("🎯 UI State: horizontal=\(cameraManager.isDeviceHorizontal), landscapeRight=\(cameraManager.isLandscapeRight), recording=\(cameraManager.isRecording), ready=\(cameraManager.isCameraReady), frontCam=\(cameraManager.isUsingFrontCamera), rotation=\(cameraManager.uiRotationAngle)")
+                                print("🎯 QR State: detected=\(cameraManager.alignmentState.bothQRCodesDetected), rollGood=\(cameraManager.alignmentState.isRollGood), centered=\(cameraManager.alignmentState.isCentered)")
+                            }()
+                            
+                            // All guidance panels - show when in correct orientation
+                            if cameraManager.isCorrectLandscape && !cameraManager.isRecording && cameraManager.isCameraReady && !cameraManager.isUsingFrontCamera {
+                                // Main guidance content
+                                VStack(spacing: 8) {
+                                    // Viewing angle guidance
+                                    if !cameraManager.isViewingAngleGood {
+                                        viewingAngleGuidanceCompact
+                                    }
+                                    
+                                    // Roll guidance
+                                    if cameraManager.alignmentState.bothQRCodesDetected && 
+                                       !cameraManager.alignmentState.isRollGood {
+                                        rollGuidanceCompact
+                                    }
+                                    
+                                    // Centering guidance
+                                    if cameraManager.alignmentState.bothQRCodesDetected && 
+                                       !cameraManager.alignmentState.isCentered {
+                                        centeringGuidanceCompact
+                                    }
+                                    
+                                    // Feedback panel - always show
+                                    feedbackPanelCompact
+                                    
+                                    // Compact info panel
+                                    if cameraManager.alignmentState.bothQRCodesDetected {
+                                        compactInfoPanel
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .rotationEffect(.degrees(-cameraManager.uiRotationAngle))
+                            }
+                            
+                            // Recording indicator - stays fixed at center
                             if cameraManager.isRecording {
                                 recordingIndicator
                             }
                             
-                            // Bottom controls
+                            // Bottom controls - stays fixed
                             if cameraManager.isCameraReady {
                                 bottomControls
                             }
+                        }
+                        
+                        // Movement warning banner - positioned on right edge (horizontal top in landscape-right mode)
+                        if cameraManager.isRecording, let warning = cameraManager.movementWarning {
+                            HStack {
+                                Spacer()
+                                movementWarningBanner(warning: warning)
+                                    .rotationEffect(.degrees(-cameraManager.uiRotationAngle))
+                                    .padding(.trailing, 20)
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
                 }
@@ -129,6 +189,21 @@ struct CameraAlignmentView: View {
             }
         } message: {
             Text("Please enable camera access in Settings to record your coin stacking task.")
+        }
+        .alert("Recording Quality", isPresented: $showRetakeDialog) {
+            Button("Use This Video") {
+                // Submit the video anyway
+                if let url = pendingVideoURL, let metadata = pendingMetadata {
+                    onRecordingComplete(url, metadata)
+                }
+            }
+            Button("Retake Video", role: .cancel) {
+                // Clear pending and let user record again
+                pendingVideoURL = nil
+                pendingMetadata = nil
+            }
+        } message: {
+            Text("The camera moved quite a bit during recording. For best results, try to keep the phone steady.\n\nYou can still use this video, or record again.")
         }
     }
     
@@ -195,7 +270,7 @@ struct CameraAlignmentView: View {
                 Text("Hold Phone Horizontally")
                     .font(.custom("Avenir-Heavy", size: 16))
                     .foregroundColor(.white)
-                Text("Rotate for best video quality")
+                Text("Charging port should be on the right side")
                     .font(.custom("Avenir-Medium", size: 13))
                     .foregroundColor(Color(hex: "778DA9"))
             }
@@ -213,6 +288,69 @@ struct CameraAlignmentView: View {
         .padding(.bottom, 12)
         .transition(.move(edge: .top).combined(with: .opacity))
         .animation(.easeInOut(duration: 0.3), value: cameraManager.isDeviceHorizontal)
+    }
+    
+    /// Warning shown when phone is horizontal but in the wrong orientation (charging port on left instead of right)
+    private var wrongLandscapeGuidance: some View {
+        HStack(spacing: 12) {
+            // Rotation arrow showing which way to flip
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(Color(hex: "FF5722"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Horizontal the Other Way")
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text("Rotate 180° so charging port is on your RIGHT")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "FF5722"), lineWidth: 2)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 12)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.isLandscapeRight)
+    }
+    
+    /// Warning shown when using front camera
+    private var frontCameraWarning: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "camera.rotate.fill")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(Color(hex: "FF5722"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Use Rear Camera")
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text("Tap the camera flip button to switch to rear camera")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "FF5722").opacity(0.5), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 12)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.isUsingFrontCamera)
     }
     
     private var viewingAngleGuidance: some View {
@@ -245,6 +383,119 @@ struct CameraAlignmentView: View {
         .padding(.bottom, 12)
         .transition(.move(edge: .top).combined(with: .opacity))
         .animation(.easeInOut(duration: 0.3), value: cameraManager.isViewingAngleGood)
+    }
+    
+    /// Guidance for rotating the phone when QR code roll is outside ±5°
+    private var rollGuidance: some View {
+        let roll = cameraManager.alignmentState.qrCodeRoll
+        let shouldRotateClockwise = roll < 0  // If roll is negative, rotate clockwise to fix
+        
+        return HStack(spacing: 16) {
+            // Rotation arrow - shows which way to rotate
+            // Phone is horizontal, so we show curved rotation arrows
+            Image(systemName: shouldRotateClockwise ? "arrow.clockwise" : "arrow.counterclockwise")
+                .font(.system(size: 32, weight: .medium))
+                .foregroundColor(Color(hex: "FF9800"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Rotate Phone \(shouldRotateClockwise ? "Clockwise" : "Counter-Clockwise")")
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text("QR code is tilted \(abs(Int(roll)))° — straighten to ±5°")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "FF9800").opacity(0.5), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 8)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.alignmentState.qrCodeRoll)
+    }
+    
+    /// Guidance for centering QR codes on screen
+    private var centeringGuidance: some View {
+        let center = cameraManager.alignmentState.qrCodesCenter
+        let hTolerance = AlignmentState.horizontalCenterTolerance  // Stricter for horizontal
+        let vTolerance = AlignmentState.verticalCenterTolerance
+        let idealY = AlignmentState.idealVerticalCenter
+        
+        // Determine which directions need adjustment
+        // If QR is on LEFT of frame, move camera LEFT to bring QR to center
+        // If QR is on RIGHT of frame, move camera RIGHT to bring QR to center
+        let needsMoveLeft = center.x < 0.5 - hTolerance
+        let needsMoveRight = center.x > 0.5 + hTolerance
+        let needsMoveDown = center.y < idealY - vTolerance  // QR is low, move camera down
+        let needsMoveUp = center.y > idealY + vTolerance  // QR is high, move camera up
+        
+        // Choose the primary direction arrow
+        let arrowName: String
+        let directionText: String
+        
+        if needsMoveRight && needsMoveUp {
+            arrowName = "arrow.up.right"
+            directionText = "Move camera up and right"
+        } else if needsMoveRight && needsMoveDown {
+            arrowName = "arrow.down.right"
+            directionText = "Move camera down and right"
+        } else if needsMoveLeft && needsMoveUp {
+            arrowName = "arrow.up.left"
+            directionText = "Move camera up and left"
+        } else if needsMoveLeft && needsMoveDown {
+            arrowName = "arrow.down.left"
+            directionText = "Move camera down and left"
+        } else if needsMoveRight {
+            arrowName = "arrow.right"
+            directionText = "Move camera right"
+        } else if needsMoveLeft {
+            arrowName = "arrow.left"
+            directionText = "Move camera left"
+        } else if needsMoveUp {
+            arrowName = "arrow.up"
+            directionText = "Move camera up"
+        } else if needsMoveDown {
+            arrowName = "arrow.down"
+            directionText = "Move camera down"
+        } else {
+            arrowName = "viewfinder"
+            directionText = "Center QR codes"
+        }
+        
+        return HStack(spacing: 16) {
+            Image(systemName: arrowName)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(Color(hex: "9C27B0"))
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(directionText)
+                    .font(.custom("Avenir-Heavy", size: 16))
+                    .foregroundColor(.white)
+                Text("Keep QR codes centered in frame")
+                    .font(.custom("Avenir-Medium", size: 13))
+                    .foregroundColor(Color(hex: "778DA9"))
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color(hex: "9C27B0").opacity(0.5), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 40)
+        .padding(.bottom, 8)
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: cameraManager.alignmentState.qrCodesCenter.x)
     }
     
     private var feedbackPanel: some View {
@@ -288,10 +539,8 @@ struct CameraAlignmentView: View {
             }
         }
         .padding(24)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.black.opacity(0.7))
-        )
+        .background(Color.black.opacity(0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
         .padding(.horizontal, 40)
         .padding(.bottom, 20)
     }
@@ -327,6 +576,277 @@ struct CameraAlignmentView: View {
                 .fill(Color.black.opacity(0.7))
         )
         .padding(.bottom, 20)
+    }
+    
+    /// Shows movement warning banner during recording - positioned at top
+    private func movementWarningBanner(warning: CameraManager.MovementWarning) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: warning.icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(Color(hex: "FF9800"))
+            
+            Text(warning.message)
+                .font(.custom("Avenir-Heavy", size: 18))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.black.opacity(0.9))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color(hex: "FF9800"), lineWidth: 2)
+                )
+        )
+        .padding(.horizontal, 20)
+        .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+    
+    /// Displays phone tilt (from sensors) and distance to QR code
+    private var phoneTiltAndDistanceDisplay: some View {
+        VStack(spacing: 12) {
+            Text("Phone Orientation & Distance")
+                .font(.custom("Avenir-Heavy", size: 14))
+                .foregroundColor(.white)
+            
+            HStack(spacing: 24) {
+                // Phone tilt/pitch (how much looking down)
+                VStack(spacing: 4) {
+                    Image(systemName: "iphone.gen3")
+                        .font(.system(size: 20))
+                        .rotationEffect(.degrees(cameraManager.devicePitchAngle))
+                        .foregroundColor(Color(hex: "2196F3"))
+                    Text("Tilt")
+                        .font(.custom("Avenir-Medium", size: 11))
+                        .foregroundColor(Color(hex: "778DA9"))
+                    Text("\(Int(cameraManager.devicePitchAngle))°")
+                        .font(.custom("Avenir-Heavy", size: 18))
+                        .foregroundColor(Color(hex: "2196F3"))
+                }
+                
+                // QR code roll (angle of QR top edge from horizontal)
+                // Green if within ±5°, orange if needs rotation
+                VStack(spacing: 4) {
+                    let isRollGood = cameraManager.alignmentState.isRollGood
+                    let rollColor = isRollGood ? Color(hex: "4CAF50") : Color(hex: "FF9800")
+                    
+                    ZStack {
+                        Image(systemName: "rotate.right")
+                            .font(.system(size: 20))
+                            .rotationEffect(.degrees(Double(cameraManager.alignmentState.qrCodeRoll)))
+                            .foregroundColor(rollColor)
+                        
+                        // Small indicator icon
+                        if isRollGood {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(Color(hex: "4CAF50"))
+                                .offset(x: 12, y: -8)
+                        }
+                    }
+                    
+                    Text("QR Roll")
+                        .font(.custom("Avenir-Medium", size: 11))
+                        .foregroundColor(Color(hex: "778DA9"))
+                    Text("\(Int(cameraManager.alignmentState.qrCodeRoll))°")
+                        .font(.custom("Avenir-Heavy", size: 18))
+                        .foregroundColor(rollColor)
+                }
+                
+                // Distance to QR code
+                VStack(spacing: 4) {
+                    Image(systemName: "ruler")
+                        .font(.system(size: 20))
+                        .foregroundColor(Color(hex: "E0A458"))
+                    Text("Distance")
+                        .font(.custom("Avenir-Medium", size: 11))
+                        .foregroundColor(Color(hex: "778DA9"))
+                    if let distance = cameraManager.alignmentState.distanceToTopQR {
+                        Text("\(Int(distance)) cm")
+                            .font(.custom("Avenir-Heavy", size: 18))
+                            .foregroundColor(Color(hex: "E0A458"))
+                    } else {
+                        Text("--")
+                            .font(.custom("Avenir-Heavy", size: 18))
+                            .foregroundColor(Color(hex: "778DA9"))
+                    }
+                }
+            }
+            
+            // Viewing angle feedback
+            HStack(spacing: 8) {
+                Image(systemName: cameraManager.isViewingAngleGood ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundColor(cameraManager.isViewingAngleGood ? Color(hex: "4CAF50") : Color(hex: "FF9800"))
+                Text(cameraManager.isViewingAngleGood ? "Good angle (40-50°)" : (cameraManager.devicePitchAngle > 50 ? "Too steep (tilt up)" : "Too flat (tilt down)"))
+                    .font(.custom("Avenir-Medium", size: 12))
+                    .foregroundColor(cameraManager.isViewingAngleGood ? Color(hex: "4CAF50") : Color(hex: "FF9800"))
+            }
+            .padding(.top, 4)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.black.opacity(0.8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
+    }
+    
+    // MARK: - Compact Views for Landscape Mode
+    
+    /// Compact info panel showing roll, tilt, and distance - positioned at top-right
+    private var compactInfoPanel: some View {
+        VStack(spacing: 6) {
+            // Roll
+            HStack(spacing: 4) {
+                let isRollGood = cameraManager.alignmentState.isRollGood
+                let rollColor = isRollGood ? Color(hex: "4CAF50") : Color(hex: "FF9800")
+                Image(systemName: isRollGood ? "checkmark.circle.fill" : "rotate.right")
+                    .font(.system(size: 12))
+                    .foregroundColor(rollColor)
+                Text("\(Int(cameraManager.alignmentState.qrCodeRoll))°")
+                    .font(.custom("Avenir-Heavy", size: 14))
+                    .foregroundColor(rollColor)
+            }
+            
+            // Tilt
+            HStack(spacing: 4) {
+                Image(systemName: "iphone.gen3")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color(hex: "2196F3"))
+                Text("\(Int(cameraManager.devicePitchAngle))°")
+                    .font(.custom("Avenir-Heavy", size: 14))
+                    .foregroundColor(Color(hex: "2196F3"))
+            }
+            
+            // Distance
+            if let distance = cameraManager.alignmentState.distanceToTopQR {
+                HStack(spacing: 4) {
+                    Image(systemName: "ruler")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(hex: "E0A458"))
+                    Text("\(Int(distance))cm")
+                        .font(.custom("Avenir-Heavy", size: 14))
+                        .foregroundColor(Color(hex: "E0A458"))
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.black.opacity(0.8))
+        )
+    }
+    
+    /// Compact viewing angle guidance
+    private var viewingAngleGuidanceCompact: some View {
+        HStack(spacing: 8) {
+            Image(systemName: cameraManager.devicePitchAngle > 50 ? "arrow.up" : "arrow.down")
+                .font(.system(size: 16))
+                .foregroundColor(Color(hex: "2196F3"))
+            Text(cameraManager.devicePitchAngle > 50 ? "Tilt up" : "Tilt down")
+                .font(.custom("Avenir-Medium", size: 13))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.8))
+                .overlay(Capsule().stroke(Color(hex: "2196F3").opacity(0.5), lineWidth: 1))
+        )
+    }
+    
+    /// Compact roll guidance
+    private var rollGuidanceCompact: some View {
+        let roll = cameraManager.alignmentState.qrCodeRoll
+        let clockwise = roll < 0
+        
+        return HStack(spacing: 8) {
+            Image(systemName: clockwise ? "arrow.clockwise" : "arrow.counterclockwise")
+                .font(.system(size: 16))
+                .foregroundColor(Color(hex: "FF9800"))
+            Text(clockwise ? "Rotate →" : "Rotate ←")
+                .font(.custom("Avenir-Medium", size: 13))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.8))
+                .overlay(Capsule().stroke(Color(hex: "FF9800").opacity(0.5), lineWidth: 1))
+        )
+    }
+    
+    /// Compact centering guidance
+    private var centeringGuidanceCompact: some View {
+        let center = cameraManager.alignmentState.qrCodesCenter
+        let hTolerance = AlignmentState.horizontalCenterTolerance  // Stricter for horizontal
+        let vTolerance = AlignmentState.verticalCenterTolerance
+        let idealY = AlignmentState.idealVerticalCenter // 0.33 - bottom 2/3 of screen
+        
+        // If QR is on LEFT of frame (center.x < 0.5), move camera LEFT to bring QR to center
+        // If QR is on RIGHT of frame (center.x > 0.5), move camera RIGHT to bring QR to center
+        let needsLeft = center.x < 0.5 - hTolerance
+        let needsRight = center.x > 0.5 + hTolerance
+        // Use idealY (0.33) instead of 0.5 - QR codes should be in bottom 2/3
+        // If QR is too low (center.y < idealY), move camera DOWN to bring QR up
+        let needsDown = center.y < idealY - vTolerance
+        let needsUp = center.y > idealY + vTolerance
+        
+        let arrowName: String
+        if needsRight && needsUp { arrowName = "arrow.up.right" }
+        else if needsRight && needsDown { arrowName = "arrow.down.right" }
+        else if needsLeft && needsUp { arrowName = "arrow.up.left" }
+        else if needsLeft && needsDown { arrowName = "arrow.down.left" }
+        else if needsRight { arrowName = "arrow.right" }
+        else if needsLeft { arrowName = "arrow.left" }
+        else if needsUp { arrowName = "arrow.up" }
+        else if needsDown { arrowName = "arrow.down" }
+        else { arrowName = "viewfinder" }
+        
+        return HStack(spacing: 8) {
+            Image(systemName: arrowName)
+                .font(.system(size: 16))
+                .foregroundColor(Color(hex: "9C27B0"))
+            Text("Move camera")
+                .font(.custom("Avenir-Medium", size: 13))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.8))
+                .overlay(Capsule().stroke(Color(hex: "9C27B0").opacity(0.5), lineWidth: 1))
+        )
+    }
+    
+    /// Compact feedback panel
+    private var feedbackPanelCompact: some View {
+        HStack(spacing: 10) {
+            Image(systemName: cameraManager.alignmentState.feedbackIcon)
+                .font(.system(size: 20))
+                .foregroundColor(feedbackColor)
+            
+            Text(cameraManager.alignmentState.feedbackMessage)
+                .font(.custom("Avenir-Heavy", size: 14))
+                .foregroundColor(.white)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.8))
+        )
     }
     
     private var bottomControls: some View {
@@ -442,7 +962,16 @@ struct CameraAlignmentView: View {
     private func startRecording() {
         cameraManager.startRecording { url, metadata in
             if let url = url, let metadata = metadata {
-                onRecordingComplete(url, metadata)
+                // Check if recording had excessive movement
+                if cameraManager.recordingHadExcessiveMovement {
+                    // Store pending video and show retake dialog
+                    pendingVideoURL = url
+                    pendingMetadata = metadata
+                    showRetakeDialog = true
+                } else {
+                    // Good recording, proceed directly
+                    onRecordingComplete(url, metadata)
+                }
             }
         }
     }
@@ -508,3 +1037,4 @@ private struct PulsingModifier: ViewModifier {
         onBack: {}
     )
 }
+

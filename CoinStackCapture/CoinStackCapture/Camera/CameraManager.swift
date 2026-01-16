@@ -6,6 +6,28 @@ import CoreMotion
 /// Manages camera session, preview, and frame processing for QR code detection
 @MainActor
 class CameraManager: NSObject, ObservableObject {
+
+    // MARK: - Distance Calculation Constants
+    
+    /// Known QR code size in centimeters
+    private static let qrCodeSizeCm: Double = 6.0
+    
+    /// Approximate focal length in pixels (for iPhone at 1920x1080)
+    /// iPhone wide camera ~26mm equivalent, sensor ~4.8mm
+    /// focal_pixels ≈ image_width * focal_mm / sensor_width_mm ≈ 1920 * 4 / 4.8 ≈ 1600
+    private static let focalLengthPixels: Double = 1600.0
+    
+    // MARK: - Temporal Smoothing for QR Detection
+    
+    /// History of QR detection states for temporal smoothing (reduces flickering)
+    /// Each entry is (timestamp, wasDetected)
+    private var detectionHistory: [(timestamp: Date, detected: Bool, corners: [[CGPoint]], distance: CGFloat?, roll: CGFloat)] = []
+    
+    /// Time window for temporal smoothing (0.5 seconds)
+    private static let smoothingWindowSeconds: TimeInterval = 0.5
+    
+    /// Threshold for considering QR as detected (majority of recent frames)
+    private static let detectionThreshold: Double = 0.5
     
     // MARK: - Published Properties
     
@@ -30,6 +52,13 @@ class CameraManager: NSObject, ObservableObject {
     /// Whether the device is in landscape orientation (horizontal)
     @Published var isDeviceHorizontal = false
     
+    /// Whether the device is in the correct landscape orientation
+    /// For this app, we expect landscape-right (charging port on RIGHT side when viewing screen)
+    @Published var isCorrectLandscape = false
+    
+    /// Current landscape mode: true = landscape-right (correct), false = landscape-left (wrong)
+    @Published var isLandscapeRight = false
+    
     /// Current device tilt angle (degrees from horizontal)
     @Published var deviceTiltAngle: Double = 0
     
@@ -41,8 +70,72 @@ class CameraManager: NSObject, ObservableObject {
     /// Phone should be angled to look at paper from the side, not directly above
     @Published var isViewingAngleGood = true
     
+    /// Rotation angle for UI elements to match landscape orientation (degrees)
+    /// 90 = landscape-right, -90 = landscape-left
+    @Published var uiRotationAngle: Double = 0
+    
     /// Whether using front camera
     @Published var isUsingFrontCamera = false
+    
+    // MARK: - Movement Tracking During Recording
+    
+    /// Current movement warning to show user during recording
+    @Published var movementWarning: MovementWarning?
+    
+    /// Whether the recording had excessive movement overall
+    @Published var recordingHadExcessiveMovement = false
+    
+    /// Movement warning types
+    enum MovementWarning: Equatable {
+        case drifting
+        case tooMuchMovement
+        case qrCodeLost
+        case tooFar
+        case tooClose
+        
+        var message: String {
+            switch self {
+            case .drifting: return "Keep QR code in blue box"
+            case .tooMuchMovement: return "Hold steady — too much movement"
+            case .qrCodeLost: return "QR code lost — keep in frame"
+            case .tooFar: return "Move closer (60-75cm)"
+            case .tooClose: return "Move back (60-75cm)"
+            }
+        }
+        
+        var icon: String {
+            switch self {
+            case .drifting: return "viewfinder"
+            case .tooMuchMovement: return "exclamationmark.triangle"
+            case .qrCodeLost: return "viewfinder"
+            case .tooFar: return "arrow.down.to.line"
+            case .tooClose: return "arrow.up.to.line"
+            }
+        }
+    }
+    
+    /// History of QR code centers during recording for movement analysis
+    private var recordingMovementHistory: [(timestamp: Date, center: CGPoint)] = []
+    
+    /// Number of frames where QR was lost during recording
+    private var framesWithQRLost: Int = 0
+    
+    /// Total frames during recording
+    private var totalRecordingFrames: Int = 0
+    
+    /// Timestamp when the last warning was shown (for minimum display duration)
+    private var lastWarningTime: Date?
+    
+    /// Minimum duration to show a warning (seconds)
+    private static let warningMinDisplayDuration: TimeInterval = 1.5
+    
+    /// Movement threshold (normalized coordinates) - movements larger than this trigger warnings
+    /// More sensitive: 0.012 (was 0.02)
+    private static let movementWarningThreshold: CGFloat = 0.012
+    
+    /// Movement threshold for "excessive" overall - if average movement exceeds this, recommend retake
+    /// More sensitive: 0.008 (was 0.015)
+    private static let excessiveMovementThreshold: CGFloat = 0.008
     
     // MARK: - Camera Properties
     
@@ -91,6 +184,7 @@ class CameraManager: NSObject, ObservableObject {
         // Default to allowing recording
         isDeviceHorizontal = true
         isViewingAngleGood = true
+        isCorrectLandscape = true
         
         guard motionManager.isDeviceMotionAvailable else { return }
         
@@ -107,17 +201,34 @@ class CameraManager: NSObject, ObservableObject {
             self.deviceTiltAngle = tiltAngle
             self.isDeviceHorizontal = isLandscape
             
+            // Detect landscape orientation
+            // When viewing the screen with phone horizontal:
+            // gravity.x < 0 means device is rotated with charging port on RIGHT (correct for this app)
+            // gravity.x > 0 means device is rotated with charging port on LEFT (wrong)
+            let landscapeRight = gravity.x < 0
+            self.isLandscapeRight = landscapeRight
+            self.isCorrectLandscape = isLandscape && landscapeRight
+            
+            // Calculate UI rotation angle for overlays to make them readable
+            // When charging port is on RIGHT (gravity.x < 0): rotate UI -90° so text reads correctly
+            // When charging port is on LEFT (gravity.x > 0): rotate UI +90°
+            if isLandscape {
+                self.uiRotationAngle = landscapeRight ? -90 : 90
+            } else {
+                // Portrait - no rotation needed but show warning
+                self.uiRotationAngle = 0
+            }
+            
             // Calculate pitch angle (how much the phone is looking down)
             // gravity.z: -1 = looking straight down (bird's eye), 0 = looking straight ahead
             // Convert to degrees: 0 = straight ahead, -90 = straight down
             let pitchAngle = asin(-gravity.z) * 180 / .pi
             self.devicePitchAngle = pitchAngle
             
-            // Good viewing angle: phone should be tilted 10-60° down (not flat/bird's eye)
-            // At 100cm horizontal, 50cm vertical = arctan(0.5) ≈ 27° is ideal
-            // Allow range of 10° to 60° to be flexible
-            let isTooFlat = pitchAngle > 60  // Looking too straight down (bird's eye)
-            let isTooStraight = pitchAngle < 5  // Looking almost straight ahead
+            // Good viewing angle: phone should be tilted 40-50° down
+            // This ensures consistent framing for video capture
+            let isTooFlat = pitchAngle > 50  // Looking too straight down
+            let isTooStraight = pitchAngle < 40  // Not tilted enough
             self.isViewingAngleGood = !isTooFlat && !isTooStraight
         }
     }
@@ -415,6 +526,14 @@ class CameraManager: NSObject, ObservableObject {
         recordingStartTime = Date()
         recordingDuration = 0
         
+        // Reset movement tracking
+        recordingMovementHistory.removeAll()
+        framesWithQRLost = 0
+        totalRecordingFrames = 0
+        movementWarning = nil
+        lastWarningTime = nil
+        recordingHadExcessiveMovement = false
+        
         // Start timer on main thread
         let startTime = Date()
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -432,6 +551,162 @@ class CameraManager: NSObject, ObservableObject {
         movieOutput.stopRecording()
         recordingTimer?.invalidate()
         recordingTimer = nil
+        
+        // Analyze recording quality
+        analyzeRecordingQuality()
+        
+        // Clear warning
+        movementWarning = nil
+    }
+    
+    /// Analyzes the recording for excessive movement
+    private func analyzeRecordingQuality() {
+        // Check if too many frames had QR lost
+        let lostRatio = totalRecordingFrames > 0 ? Double(framesWithQRLost) / Double(totalRecordingFrames) : 0
+        
+        // Calculate average movement between frames
+        var totalMovement: CGFloat = 0
+        var movementCount = 0
+        
+        for i in 1..<recordingMovementHistory.count {
+            let prev = recordingMovementHistory[i - 1].center
+            let curr = recordingMovementHistory[i].center
+            let movement = hypot(curr.x - prev.x, curr.y - prev.y)
+            totalMovement += movement
+            movementCount += 1
+        }
+        
+        let avgMovement = movementCount > 0 ? totalMovement / CGFloat(movementCount) : 0
+        
+        // Recording had excessive movement if:
+        // - More than 15% of frames had QR lost
+        // - OR average movement per frame exceeds threshold
+        recordingHadExcessiveMovement = lostRatio > 0.15 || avgMovement > CameraManager.excessiveMovementThreshold
+        
+        print("📊 Recording quality: lost=\(String(format: "%.1f", lostRatio * 100))%, avgMovement=\(String(format: "%.4f", avgMovement)), excessive=\(recordingHadExcessiveMovement)")
+    }
+    
+    /// Processes QR codes during recording to track movement
+    private func processQRCodesDuringRecording(_ observations: [VNBarcodeObservation]) {
+        totalRecordingFrames += 1
+        
+        // Extract QR code positions
+        var allCorners: [[CGPoint]] = []
+        
+        for observation in observations {
+            let tl = observation.topLeft
+            let tr = observation.topRight
+            let br = observation.bottomRight
+            let bl = observation.bottomLeft
+            
+            guard !tl.x.isNaN && !tl.y.isNaN,
+                  !tr.x.isNaN && !tr.y.isNaN,
+                  !br.x.isNaN && !br.y.isNaN,
+                  !bl.x.isNaN && !bl.y.isNaN else {
+                continue
+            }
+            
+            let rawCornerPoints = [
+                CGPoint(x: CGFloat(tl.x), y: CGFloat(tl.y)),
+                CGPoint(x: CGFloat(tr.x), y: CGFloat(tr.y)),
+                CGPoint(x: CGFloat(br.x), y: CGFloat(br.y)),
+                CGPoint(x: CGFloat(bl.x), y: CGFloat(bl.y))
+            ]
+            allCorners.append(rawCornerPoints)
+        }
+        
+        let qrDetected = allCorners.count >= 2
+        
+        if !qrDetected {
+            framesWithQRLost += 1
+            // Only warn about QR lost if it persists
+            if framesWithQRLost > 5 {
+                movementWarning = .qrCodeLost
+                lastWarningTime = Date()
+            }
+            return
+        }
+        
+        // Reset QR lost counter since we found QR codes
+        framesWithQRLost = 0
+        
+        // Calculate distance during recording
+        let imageSize = CGSize(width: 1920, height: 1080)
+        var currentDistance: CGFloat = 0
+        if let firstCorners = allCorners.first {
+            currentDistance = CGFloat(calculateDistanceToCm(corners: firstCorners, imageSize: imageSize))
+        }
+        
+        // Calculate center of all QR codes
+        var totalX: CGFloat = 0
+        var totalY: CGFloat = 0
+        var pointCount: CGFloat = 0
+        
+        for corners in allCorners {
+            for corner in corners {
+                totalX += corner.x
+                totalY += corner.y
+                pointCount += 1
+            }
+        }
+        
+        let currentCenter = CGPoint(
+            x: totalX / pointCount,
+            y: totalY / pointCount
+        )
+        
+        let now = Date()
+        
+        // Check movement against recent history (compare to average of last few frames for stability)
+        let recentEntries = recordingMovementHistory.suffix(3)
+        if recentEntries.count >= 2 {
+            // Calculate movement from average of recent positions
+            let avgPrevX = recentEntries.dropLast().map { $0.center.x }.reduce(0, +) / CGFloat(recentEntries.count - 1)
+            let avgPrevY = recentEntries.dropLast().map { $0.center.y }.reduce(0, +) / CGFloat(recentEntries.count - 1)
+            
+            let movement = CGPoint(
+                x: currentCenter.x - avgPrevX,
+                y: currentCenter.y - avgPrevY
+            )
+            let movementMagnitude = hypot(movement.x, movement.y)
+            
+            // Check if we should show a new warning or update existing one
+            if movementMagnitude > CameraManager.movementWarningThreshold {
+                // Set warning and record the time
+                let newWarning: MovementWarning
+                if movementMagnitude > CameraManager.movementWarningThreshold * 2.0 {
+                    newWarning = .tooMuchMovement
+                } else {
+                    // Simple drifting warning - keep QR in blue box
+                    newWarning = .drifting
+                }
+                
+                movementWarning = newWarning
+                lastWarningTime = now
+            } else {
+                // Movement is acceptable - only clear warning after minimum display duration
+                if let warningTime = lastWarningTime {
+                    let elapsed = now.timeIntervalSince(warningTime)
+                    if elapsed >= CameraManager.warningMinDisplayDuration {
+                        movementWarning = nil
+                        lastWarningTime = nil
+                    }
+                    // Otherwise keep showing the warning
+                } else {
+                    // No warning time recorded, clear immediately
+                    movementWarning = nil
+                }
+            }
+        }
+        
+        // During recording, only show drift warnings - distance warnings are for pre-recording only
+        
+        // Add to history
+        recordingMovementHistory.append((timestamp: now, center: currentCenter))
+        
+        // Keep only last 2 seconds of history (at ~30fps = 60 frames)
+        let cutoff = now.addingTimeInterval(-2.0)
+        recordingMovementHistory.removeAll { $0.timestamp < cutoff }
     }
 }
 
@@ -468,34 +743,215 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
     
-    /// Processes detected QR codes and updates alignment state
-    private func processQRCodes(_ observations: [VNBarcodeObservation]) {
-        // Don't update alignment during recording
-        guard !isRecording else { return }
+    /// Calculates distance from camera to QR code in centimeters
+    /// Uses known QR code size (6cm) and apparent pixel size
+    /// Formula: distance = (real_size * focal_length) / pixel_size
+    private func calculateDistanceToCm(corners: [CGPoint], imageSize: CGSize) -> Double {
+        guard corners.count == 4 else { return 0 }
         
-        var newState = AlignmentState()
-        
-        // Extract QR code positions - use the corner points for accurate square bounds
-        var positions: [CGRect] = []
-        
-        for observation in observations {
-            // Use the bounding box directly - Vision provides it in normalized coordinates
-            // The bounding box from Vision is the axis-aligned bounding box of the QR code
-            let box = observation.boundingBox
-            positions.append(box)
+        // Convert normalized coordinates to pixels
+        let pixelCorners = corners.map { corner in
+            CGPoint(
+                x: corner.x * imageSize.width,
+                y: corner.y * imageSize.height
+            )
         }
         
-        newState.qrCodePositions = positions
-        newState.bothQRCodesDetected = positions.count >= 2
+        // Calculate all edge lengths in pixels
+        let edge1 = hypot(pixelCorners[0].x - pixelCorners[1].x, pixelCorners[0].y - pixelCorners[1].y)
+        let edge2 = hypot(pixelCorners[1].x - pixelCorners[2].x, pixelCorners[1].y - pixelCorners[2].y)
+        let edge3 = hypot(pixelCorners[2].x - pixelCorners[3].x, pixelCorners[2].y - pixelCorners[3].y)
+        let edge4 = hypot(pixelCorners[3].x - pixelCorners[0].x, pixelCorners[3].y - pixelCorners[0].y)
         
-        if newState.bothQRCodesDetected {
+        // Average edge length gives us a robust estimate
+        let avgEdgeLengthPixels = (edge1 + edge2 + edge3 + edge4) / 4.0
+        
+        guard avgEdgeLengthPixels > 0 else { return 0 }
+        
+        // Distance formula: distance = (real_size * focal_length) / pixel_size
+        // Result in cm because qrCodeSizeCm is in cm
+        let distanceCm = (CameraManager.qrCodeSizeCm * CameraManager.focalLengthPixels) / Double(avgEdgeLengthPixels)
+        
+        return distanceCm
+    }
+    
+    /// Processes detected QR codes and updates alignment state with temporal smoothing
+    private func processQRCodes(_ observations: [VNBarcodeObservation]) {
+        let now = Date()
+        
+        // During recording, track movement but don't update alignment UI
+        if isRecording {
+            processQRCodesDuringRecording(observations)
+            return
+        }
+        
+        // Extract QR code positions and corner points from current frame
+        var positions: [CGRect] = []
+        var allCorners: [[CGPoint]] = []
+        
+        // Image size for distance calculation (using capture session preset)
+        let imageSize = CGSize(width: 1920, height: 1080)
+        
+        for observation in observations {
+            // Use the bounding box for backward compatibility
+            let box = observation.boundingBox
+            positions.append(box)
+            
+            // Extract corner points for accurate visualization
+            // VNBarcodeObservation provides corner points in normalized coordinates (0-1, bottom-left origin)
+            let tl = observation.topLeft
+            let tr = observation.topRight
+            let br = observation.bottomRight
+            let bl = observation.bottomLeft
+            
+            // Verify corner points are valid
+            guard !tl.x.isNaN && !tl.y.isNaN,
+                  !tr.x.isNaN && !tr.y.isNaN,
+                  !br.x.isNaN && !br.y.isNaN,
+                  !bl.x.isNaN && !bl.y.isNaN else {
+                continue
+            }
+            
+            // Convert to CGPoint array (in normalized coordinates, bottom-left origin)
+            let rawCornerPoints = [
+                CGPoint(x: CGFloat(tl.x), y: CGFloat(tl.y)),
+                CGPoint(x: CGFloat(tr.x), y: CGFloat(tr.y)),
+                CGPoint(x: CGFloat(br.x), y: CGFloat(br.y)),
+                CGPoint(x: CGFloat(bl.x), y: CGFloat(bl.y))
+            ]
+            
+            // Store corner points for visualization
+            allCorners.append(rawCornerPoints)
+        }
+        
+        let currentlyDetected = positions.count >= 2
+        
+        // Calculate current frame's distance and roll
+        var currentDistance: CGFloat? = nil
+        var currentRoll: CGFloat = 0
+        
+        if let firstCorners = allCorners.first, firstCorners.count == 4 {
+            currentDistance = CGFloat(calculateDistanceToCm(corners: firstCorners, imageSize: imageSize))
+
+            // Calculate roll from the longest horizontal edge of QR code
+            // Vision provides: topLeft(0), topRight(1), bottomRight(2), bottomLeft(3)
+            // Use the average of top and bottom edges to get a stable angle
+            let topLeft = firstCorners[0]
+            let topRight = firstCorners[1]
+            let bottomRight = firstCorners[2]
+            let bottomLeft = firstCorners[3]
+            
+            // Calculate angle of top edge
+            let topDeltaX = topRight.x - topLeft.x
+            let topDeltaY = topRight.y - topLeft.y
+            let topAngle = atan2(topDeltaY, topDeltaX)
+            
+            // Calculate angle of bottom edge
+            let bottomDeltaX = bottomRight.x - bottomLeft.x
+            let bottomDeltaY = bottomRight.y - bottomLeft.y
+            let bottomAngle = atan2(bottomDeltaY, bottomDeltaX)
+            
+            // Average the angles (handles slight perspective distortion)
+            var avgAngle = (topAngle + bottomAngle) / 2.0
+            
+            // Convert to degrees
+            var rollDegrees = avgAngle * 180.0 / .pi
+            
+            // Normalize to -90 to +90 range (we only care about small rotations from horizontal)
+            // If angle is near ±180, it means the QR is nearly horizontal but detected "upside down"
+            if rollDegrees > 90 {
+                rollDegrees -= 180
+            } else if rollDegrees < -90 {
+                rollDegrees += 180
+            }
+            
+            currentRoll = CGFloat(rollDegrees)
+        }
+        
+        // Add current detection to history
+        detectionHistory.append((
+            timestamp: now,
+            detected: currentlyDetected,
+            corners: allCorners,
+            distance: currentDistance,
+            roll: currentRoll
+        ))
+        
+        // Remove old entries outside the smoothing window
+        let cutoff = now.addingTimeInterval(-CameraManager.smoothingWindowSeconds)
+        detectionHistory.removeAll { $0.timestamp < cutoff }
+        
+        // Apply temporal smoothing: use majority vote from recent history
+        let detectedCount = detectionHistory.filter { $0.detected }.count
+        let totalCount = detectionHistory.count
+        let detectionRatio = totalCount > 0 ? Double(detectedCount) / Double(totalCount) : 0
+        
+        let smoothedDetected = detectionRatio >= CameraManager.detectionThreshold
+        
+        // Use smoothed values - prefer recent detected frames for corners/distance/roll
+        var smoothedCorners: [[CGPoint]] = allCorners
+        var smoothedDistance: CGFloat? = currentDistance
+        var smoothedRoll: CGFloat = currentRoll
+        
+        if smoothedDetected && !currentlyDetected {
+            // We're smoothing over a gap - use the most recent detected frame's data
+            if let lastDetected = detectionHistory.last(where: { $0.detected }) {
+                smoothedCorners = lastDetected.corners
+                smoothedDistance = lastDetected.distance
+                smoothedRoll = lastDetected.roll
+            }
+        }
+        
+        // Build the alignment state
+        var newState = AlignmentState()
+        newState.qrCodePositions = positions
+        newState.qrCodeCorners = smoothedCorners
+        newState.bothQRCodesDetected = smoothedDetected
+        newState.distanceToTopQR = smoothedDistance
+        newState.qrCodeRoll = smoothedRoll
+        
+        // Calculate center of all QR codes for centering guidance
+        if !smoothedCorners.isEmpty {
+            var totalX: CGFloat = 0
+            var totalY: CGFloat = 0
+            var pointCount: CGFloat = 0
+            
+            for corners in smoothedCorners {
+                for corner in corners {
+                    totalX += corner.x
+                    totalY += corner.y
+                    pointCount += 1
+                }
+            }
+            
+            if pointCount > 0 {
+                // Center in normalized coordinates (0-1)
+                // Note: Vision uses bottom-left origin, so Y is already correct for our needs
+                newState.qrCodesCenter = CGPoint(
+                    x: totalX / pointCount,
+                    y: totalY / pointCount
+                )
+            }
+        }
+
+        if smoothedDetected {
             // QR codes are reference markers only - no content validation needed
             newState.qrCodesMatchTemplate = true
             
-            // Calculate distance between first two QR codes
-            if positions.count >= 2 {
-                let center1 = CGPoint(x: positions[0].midX, y: positions[0].midY)
-                let center2 = CGPoint(x: positions[1].midX, y: positions[1].midY)
+            // Calculate distance between first two QR codes using smoothed corners
+            if smoothedCorners.count >= 2 {
+                // Calculate centers from corners
+                let corners1 = smoothedCorners[0]
+                let corners2 = smoothedCorners[1]
+                
+                let center1 = CGPoint(
+                    x: corners1.reduce(0) { $0 + $1.x } / 4,
+                    y: corners1.reduce(0) { $0 + $1.y } / 4
+                )
+                let center2 = CGPoint(
+                    x: corners2.reduce(0) { $0 + $1.x } / 4,
+                    y: corners2.reduce(0) { $0 + $1.y } / 4
+                )
                 
                 // Convert normalized coordinates to approximate pixel distance
                 // Account for the video aspect ratio (1920x1080)
@@ -573,3 +1029,4 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
         }
     }
 }
+

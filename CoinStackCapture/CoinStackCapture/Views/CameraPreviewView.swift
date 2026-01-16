@@ -28,9 +28,12 @@ struct CameraPreviewView: UIViewRepresentable {
         
         uiView.previewLayer.videoGravity = .resizeAspectFill
         
-        // Update QR code boxes using Vision coordinates
+        // Update QR code visualization with actual corner points
         // The preview layer handles all coordinate conversion automatically
-        uiView.updateQRCodeBoxes(cameraManager.alignmentState.qrCodePositions)
+        let corners = cameraManager.alignmentState.qrCodeCorners
+        let positions = cameraManager.alignmentState.qrCodePositions
+        
+        uiView.updateQRCodeBoxes(corners: corners, fallbackBoxes: positions)
         
         // Force layout update when camera becomes ready or session is running
         if cameraManager.isCameraReady || cameraManager.isSessionRunning {
@@ -72,41 +75,67 @@ class CameraPreviewUIView: UIView {
         previewLayer.frame = bounds
     }
     
-    /// Updates QR code highlight boxes using Vision bounding boxes
-    /// Vision provides normalized coordinates (0-1) with origin at bottom-left
-    func updateQRCodeBoxes(_ boxes: [CGRect]) {
+    /// Updates QR code visualization using actual corner points
+    func updateQRCodeBoxes(corners: [[CGPoint]], fallbackBoxes: [CGRect]) {
         // Remove old layers
         for layer in qrBoxLayers {
             layer.removeFromSuperlayer()
         }
         qrBoxLayers.removeAll()
         
-        // Create new layers for each detected QR code
-        for box in boxes {
-            // Vision coordinates: origin at bottom-left, Y increases upward
-            // Metadata output rect: origin at top-left, Y increases downward
-            // Flip Y coordinate to convert
-            let flippedBox = CGRect(
-                x: box.origin.x,
-                y: 1 - box.origin.y - box.height,
-                width: box.width,
-                height: box.height
-            )
+        // Draw each QR code using its corner points
+        for cornerPoints in corners {
+            guard cornerPoints.count == 4 else { continue }
             
-            // Use the preview layer's built-in coordinate conversion
-            // This handles all aspect ratio and orientation transformations automatically
-            let convertedRect = previewLayer.layerRectConverted(fromMetadataOutputRect: flippedBox)
+            // Convert Vision coordinates to screen coordinates
+            // Vision: origin at bottom-left, Y increases upward
+            // Screen: origin at top-left, Y increases downward
+            let screenCorners = cornerPoints.map { point -> CGPoint in
+                let flippedPoint = CGPoint(x: point.x, y: 1 - point.y)
+                return previewLayer.layerPointConverted(fromCaptureDevicePoint: flippedPoint)
+            }
             
-            // Create shape layer for the box
+            // Draw quadrilateral path connecting the corners
+            let path = UIBezierPath()
+            path.move(to: screenCorners[0])
+            path.addLine(to: screenCorners[1])
+            path.addLine(to: screenCorners[2])
+            path.addLine(to: screenCorners[3])
+            path.close()
+            
             let shapeLayer = CAShapeLayer()
-            let path = UIBezierPath(roundedRect: convertedRect, cornerRadius: 4)
             shapeLayer.path = path.cgPath
             shapeLayer.strokeColor = highlightColor.cgColor
             shapeLayer.fillColor = highlightColor.withAlphaComponent(0.1).cgColor
             shapeLayer.lineWidth = 2
+            shapeLayer.lineJoin = .round
             
             layer.addSublayer(shapeLayer)
             qrBoxLayers.append(shapeLayer)
+        }
+        
+        // Fallback: if no corners but we have boxes, draw rectangles
+        if corners.isEmpty && !fallbackBoxes.isEmpty {
+            for box in fallbackBoxes {
+                let flippedBox = CGRect(
+                    x: box.origin.x,
+                    y: 1 - box.origin.y - box.height,
+                    width: box.width,
+                    height: box.height
+                )
+                
+                let convertedRect = previewLayer.layerRectConverted(fromMetadataOutputRect: flippedBox)
+                
+                let shapeLayer = CAShapeLayer()
+                let path = UIBezierPath(roundedRect: convertedRect, cornerRadius: 4)
+                shapeLayer.path = path.cgPath
+                shapeLayer.strokeColor = highlightColor.cgColor
+                shapeLayer.fillColor = highlightColor.withAlphaComponent(0.1).cgColor
+                shapeLayer.lineWidth = 2
+                
+                layer.addSublayer(shapeLayer)
+                qrBoxLayers.append(shapeLayer)
+            }
         }
     }
 }
@@ -196,3 +225,4 @@ private struct CornerBrackets: View {
         }
     }
 }
+
